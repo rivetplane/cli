@@ -74,4 +74,4 @@ npx rivetplane
 npx rivetplane --help
 ```
 
-Node.js 22 or later is required. `login` stores credentials and exits. The plain command must stay running while it discovers local harnesses and relays their events.
+Node.js 24 or later is required. `login` stores credentials and exits. The plain command must stay running while it discovers local harnesses and relays their events.

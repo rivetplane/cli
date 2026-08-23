@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
-          node-version: 22.14.0
+          node-version: 24
           registry-url: https://registry.npmjs.org
       - name: Install an npm CLI that supports trusted publishing
         run: npm install --global npm@11.17.0

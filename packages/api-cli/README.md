@@ -12,7 +12,7 @@ npm install --global @rivetplane/api-cli
 rivetplane-api --version
 ```
 
-Node.js 20 or later is required.
+Node.js 24 or later is required.
 
 ## Login and credentials
 
