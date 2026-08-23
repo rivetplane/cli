@@ -1,0 +1,50 @@
+{
+  "name": "@rivetplane/api-cli",
+  "version": "0.1.0",
+  "description": "Script-friendly CLI for the Rivetplane control-plane API",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "rivetplane-api": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/*.test.*",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rivetplane/cli.git",
+    "directory": "packages/api-cli"
+  },
+  "bugs": {
+    "url": "https://github.com/rivetplane/cli/issues"
+  },
+  "homepage": "https://github.com/rivetplane/cli/tree/main/packages/api-cli#readme",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build",
+    "test": "npm run build && node --test dist/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@rivetplane/sdk": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}
