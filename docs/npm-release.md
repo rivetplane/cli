@@ -2,15 +2,13 @@
 
 The public package and executable are both named `rivetplane`.
 
-The npm registry returned `404 Not Found` for `rivetplane` on 2026-08-24. This result means that the name was available at that time. It does not reserve the name. Check it again immediately before the first release:
+`rivetplane@0.1.0` was published as a public package on 2026-08-24. Confirm the current release with:
 
 ```sh
 npm view rivetplane name version
 ```
 
-An npm `404` is the expected result before the first publication. If another publisher takes the name, use `@rivetplane/cli` as the fallback. Change the `name` field but keep the `rivetplane` bin name. The public commands would then be `npx @rivetplane/cli login --server <url>` and `npx @rivetplane/cli`.
-
-Do not publish a different final name without product approval.
+The approved package name is `rivetplane`. The earlier scoped fallback, `@rivetplane/cli`, is no longer required.
 
 ## Release controls
 
@@ -33,7 +31,7 @@ npm requires the package to exist before a trusted publisher can be attached. Af
    - Environment name: `npm`
    - Allowed action: `npm publish`
 
-5. Delete the `NPM_TOKEN` GitHub secret and revoke the short-lived npm token. Set the package to reject token-based publishing if the npm package settings offer that control. Later releases use OIDC only and get npm provenance automatically.
+5. Delete the `NPM_TOKEN` GitHub secret and revoke the short-lived npm token. Set the package to reject token-based publishing if the npm package settings offer that control. The checked-in workflow does not read an npm token. Later releases use OIDC only and get npm provenance automatically.
 
 The optional command-line form for step 4 requires npm 11.15 or later and an interactive npm login with 2FA:
 
