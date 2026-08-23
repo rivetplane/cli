@@ -4,7 +4,7 @@ The API consumer package is `@rivetplane/api-cli`. Its executable is `rivetplane
 
 ## First release
 
-1. Merge and publish `@rivetplane/sdk` version 0.1.0 from `rivetplane/harness-control-plane`.
+1. Merge and publish `@rivetplane/sdk` version 0.1.0 from its canonical `rivetplane/typescript-sdk` repository.
 2. Create the `@rivetplane/api-cli` package in the Rivetplane npm organization if the first workflow run does not create it.
 3. Create a protected GitHub environment named `npm`.
 4. For the first publication, add a short-lived granular npm token as the `NPM_TOKEN` environment secret.

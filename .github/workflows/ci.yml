@@ -25,13 +25,13 @@ jobs:
       - run: bun run client:package:verify
       - uses: actions/checkout@v6
         with:
-          repository: rivetplane/harness-control-plane
-          ref: a48023a24b748fa52a4c5d65a5db186337354961
+          repository: rivetplane/typescript-sdk
+          ref: f6110c758081899ffa5ddbc2f9a8a73d3ca4e9d3
           path: sdk-source
       - name: Build the API CLI SDK dependency
         run: |
-          npm install --prefix sdk-source/packages/sdk
-          npm pack ./sdk-source/packages/sdk --pack-destination /tmp
+          npm ci --prefix sdk-source
+          npm pack ./sdk-source --pack-destination /tmp
           npm install --prefix packages/api-cli --no-save /tmp/rivetplane-sdk-0.1.0.tgz typescript@5.9 @types/node@22
       - name: Check and test the API CLI
         run: |
