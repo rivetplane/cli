@@ -23,16 +23,10 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
       - run: bun run client:package:verify
-      - uses: actions/checkout@v6
-        with:
-          repository: rivetplane/typescript-sdk
-          ref: f6110c758081899ffa5ddbc2f9a8a73d3ca4e9d3
-          path: sdk-source
-      - name: Build the API CLI SDK dependency
+      - name: Install the pinned canonical SDK test dependency
         run: |
-          npm ci --prefix sdk-source
-          npm pack ./sdk-source --pack-destination /tmp
-          npm install --prefix packages/api-cli --no-save /tmp/rivetplane-sdk-0.1.0.tgz typescript@5.9 @types/node@22
+          echo "e72f0ec37fcd403d489c644a8b34696a77ee41d85cc5fb4fd436b931d06d3dab  packages/api-cli/test-fixtures/rivetplane-sdk-0.1.0-f6110c7.tgz" | sha256sum --check
+          npm install --prefix packages/api-cli --no-save packages/api-cli/test-fixtures/rivetplane-sdk-0.1.0-f6110c7.tgz typescript@5.9 @types/node@22
       - name: Check and test the API CLI
         run: |
           npm run --prefix packages/api-cli typecheck
@@ -41,6 +35,6 @@ jobs:
       - name: Test the API CLI package in a clean directory
         run: |
           TEST_DIR=$(mktemp -d)
-          npm install --prefix "$TEST_DIR" /tmp/rivetplane-sdk-0.1.0.tgz /tmp/rivetplane-api-cli-0.1.0.tgz
+          npm install --prefix "$TEST_DIR" packages/api-cli/test-fixtures/rivetplane-sdk-0.1.0-f6110c7.tgz /tmp/rivetplane-api-cli-0.1.0.tgz
           "$TEST_DIR/node_modules/.bin/rivetplane-api" --version
           "$TEST_DIR/node_modules/.bin/rivetplane-api" --help
