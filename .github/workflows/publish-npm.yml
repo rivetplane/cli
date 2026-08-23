@@ -50,6 +50,10 @@ jobs:
             echo "rivetplane@${PACKAGE_VERSION} already exists" >&2
             exit 1
           fi
+      - name: Verify npm publishing identity
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish with provenance
         working-directory: packages/client
         run: npm publish --access public --provenance

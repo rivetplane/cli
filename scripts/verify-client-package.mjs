@@ -68,6 +68,8 @@ try {
 
   const binary = join(installDirectory, "node_modules", ".bin", "rivetplane");
   const packageJson = JSON.parse(await readFile(join(client, "package.json"), "utf8"));
+  const installedPackageJson = JSON.parse(await readFile(join(installDirectory, "node_modules", "rivetplane", "package.json"), "utf8"));
+  assert.deepEqual(installedPackageJson.bin, { rivetplane: "dist/cli.js" }, "installed package has an invalid bin entry");
   const installedCli = await readFile(join(installDirectory, "node_modules", "rivetplane", "dist", "cli.js"), "utf8");
   assert(installedCli.startsWith("#!/usr/bin/env node\n"), "installed CLI has no Node shebang");
   assert.match(run(binary, ["--help"], { cwd: installDirectory }), /Usage:\s+rivetplane/);
