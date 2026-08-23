@@ -1,0 +1,56 @@
+{
+  "name": "rivetplane",
+  "version": "0.1.0",
+  "description": "Connect local agent harnesses to the Rivetplane control plane",
+  "keywords": [
+    "acp",
+    "agent",
+    "cli",
+    "control-plane",
+    "opencode"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/rivetplane/cli#readme",
+  "bugs": {
+    "url": "https://github.com/rivetplane/cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rivetplane/cli.git",
+    "directory": "packages/client"
+  },
+  "type": "module",
+  "bin": {
+    "rivetplane": "./dist/cli.js"
+  },
+  "files": [
+    "dist/*.js",
+    "dist/*.js.map",
+    "!dist/*.test.js",
+    "!dist/*.test.js.map",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean && rm -rf dist",
+    "start": "node dist/cli.js",
+    "test": "node --test dist/*.test.js",
+    "typecheck": "tsc --noEmit --composite false",
+    "prepack": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.18.21",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}

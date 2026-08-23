@@ -1,0 +1,43 @@
+{
+  "name": "@rivetplane/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Internal data model and wire protocol for the Rivetplane CLI",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./model": {
+      "types": "./dist/model.d.ts",
+      "import": "./dist/model.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    }
+  },
+  "files": [
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "dist/index.d.ts.map",
+    "dist/model.js",
+    "dist/model.js.map",
+    "dist/model.d.ts",
+    "dist/model.d.ts.map",
+    "dist/protocol.js",
+    "dist/protocol.js.map",
+    "dist/protocol.d.ts",
+    "dist/protocol.d.ts.map"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean && rm -rf dist",
+    "test": "node --test dist/*.test.js",
+    "typecheck": "tsc --noEmit --composite false"
+  }
+}

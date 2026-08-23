@@ -1,0 +1,64 @@
+#!/usr/bin/env node
+import { hostname } from "node:os";
+import { createRequire } from "node:module";
+import { HarnessControlClient } from "./client.js";
+import { login, readCredentials, writeCredentials } from "./credentials.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
+
+const HELP = `Rivetplane local client
+
+Usage:
+  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-url URL] [--opencode-directory PATH] [--no-opencode] [--no-relay]
+  rivetplane login --server URL [--machine-name NAME] [--machine ID --token TOKEN]
+  rivetplane --help
+
+The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, detects an
+OpenCode server at http://localhost:4096, and exposes
+the local API at http://127.0.0.1:PORT/v1.`;
+
+function flag(name: string): string | undefined { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }
+
+async function main(): Promise<void> {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) { process.stdout.write(`${HELP}\n`); return; }
+  if (process.argv.includes("--version") || process.argv.includes("-v")) { process.stdout.write(`${version}\n`); return; }
+  if (process.argv[2] === "login") {
+    const server_url = flag("--server") ?? process.env.HARNESS_CP_SERVER;
+    const machineName = flag("--machine-name");
+    if (!server_url) throw new Error("Use --server URL or set HARNESS_CP_SERVER");
+    const token = flag("--token") ?? process.env.HCP_MACHINE_TOKEN;
+    if (token) {
+      const credentials = { server_url: server_url.replace(/\/$/, ""), machine_id: flag("--machine") ?? `local-${hostname()}`, machine_name: machineName ?? hostname(), device_id: flag("--machine") ?? `local-${hostname()}`, owner_account_id: "self-hosted", token };
+      await writeCredentials(credentials); process.stdout.write(`Paired machine ${credentials.machine_name} (${credentials.machine_id}).\n`); return;
+    }
+    process.stdout.write(`Starting device pairing for ${machineName ?? hostname()}...\n`);
+    const credentials = await login({ server_url, ...(machineName ? { machine_name: machineName } : {}) });
+    process.stdout.write(`Paired machine ${credentials.machine_name} (${credentials.machine_id}).\n`); return;
+  }
+
+  const credentials = await readCredentials();
+  const discoveryDirectory = flag("--discovery-dir");
+  const localPort = Number(flag("--local-port") ?? process.env.HARNESS_CP_LOCAL_PORT ?? 41737);
+  if (!Number.isInteger(localPort) || localPort < 0 || localPort > 65_535) throw new Error("--local-port must be a valid port");
+  const client = new HarnessControlClient({
+    ...(credentials ? { credentials } : {}),
+    ...(discoveryDirectory ? { discovery_directory: discoveryDirectory } : {}),
+    local_port: localPort,
+    relay: !process.argv.includes("--no-relay"),
+    opencode_url: process.argv.includes("--no-opencode") ? false : (flag("--opencode-url") ?? process.env.HARNESS_CP_OPENCODE_URL),
+    opencode_directory: flag("--opencode-directory") ?? process.env.HARNESS_CP_OPENCODE_DIRECTORY ?? process.cwd(),
+  });
+  client.manager.registry.on("log", (message) => process.stderr.write(`${String(message)}\n`));
+  const started = await client.start();
+  process.stdout.write(`Local API: http://127.0.0.1:${started.local_port}/v1\n`);
+  process.stdout.write(credentials && !process.argv.includes("--no-relay") ? `Relay: ${credentials.server_url}\n` : "Relay: disabled (run rivetplane login to pair this machine)\n");
+  const harnesses = client.harnesses();
+  if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode: ${client.opencode ? `${client.opencode.url} for ${client.opencode.directory}` : "disabled"})\n`);
+  else for (const harness of harnesses) process.stdout.write(`Harness: ${harness.harness_type} (${harness.attached_sessions}/${harness.discovered_sessions} sessions attached)\n`);
+  let stopping = false;
+  const stop = (): void => { if (stopping) return; stopping = true; void client.stop().finally(() => process.exit(0)); };
+  process.on("SIGINT", stop); process.on("SIGTERM", stop);
+}
+
+void main().catch((error) => { process.stderr.write(`rivetplane: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
