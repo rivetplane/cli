@@ -24,7 +24,7 @@ npm requires the package to exist before a trusted publisher can be attached. Af
 
 1. Create or select the npm owner account. Enable account-level two-factor authentication. If a company must own the package, create the npm organization first and make the release operator an owner.
 2. Create a short-lived, granular npm access token that can create the public `rivetplane` package. Store it only as the `NPM_TOKEN` secret in the protected GitHub `npm` environment. Do not put it in a file, commit, issue, or workflow.
-3. Merge the release files to `main`. Add and push the `rivetplane-v0.1.0` tag as shown below. Approve the protected GitHub environment deployment. The workflow makes the first publication with provenance.
+3. Merge the release files to `main`. Add and push a matching `rivetplane-v<version>` tag. Approve the protected GitHub environment deployment. The workflow publishes the package with provenance.
 4. On npmjs.com, open `rivetplane` package settings and add a GitHub Actions trusted publisher with these exact values:
 
    - Organization or user: `rivetplane`

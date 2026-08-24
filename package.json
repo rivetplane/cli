@@ -6,7 +6,7 @@
   "license": "MIT",
   "engines": {
     "bun": ">=1.3.6",
-    "node": ">=22.0.0"
+    "node": ">=24.0.0"
   },
   "packageManager": "bun@1.3.6",
   "workspaces": [
@@ -21,7 +21,7 @@
     "client:package:verify": "node scripts/verify-client-package.mjs"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^24.0.0",
     "typescript": "^7.0.2"
   }
 }

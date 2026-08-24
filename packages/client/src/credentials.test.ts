@@ -6,7 +6,12 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { login } from "./credentials.js";
+import { browserLaunch, login } from "./credentials.js";
+
+test("opens the complete authorization URL on Windows without cmd parsing", () => {
+  const url = "https://control.example/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A51959%2Fcallback&state=state-value&code_challenge=challenge&device_id=device";
+  assert.deepEqual(browserLaunch("win32", url), { command: "explorer.exe", args: [url] });
+});
 
 test("completes browser callback pairing and stores a scoped machine token", async () => {
   const server = createServer((request, response) => {
