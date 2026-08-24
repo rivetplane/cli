@@ -4,7 +4,7 @@ Rivetplane connects local ACP-compatible and OpenCode agent sessions to a remote
 
 ## Use Rivetplane
 
-Node.js 22 or later is required.
+Node.js 24 or later is required.
 
 ```sh
 npx rivetplane login --server https://harness-control-plane-dimavedenyapin.fly.dev
@@ -17,7 +17,7 @@ Run `npx rivetplane --help` to see all options.
 
 ## Develop
 
-Install Bun 1.3.6 or later and Node.js 22 or later.
+Install Bun 1.3.6 or later and Node.js 24 or later.
 
 ```sh
 bun install
