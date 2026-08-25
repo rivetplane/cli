@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { PendingInteraction, Session, SessionStatus, TranscriptEvent, TranscriptEventPayloadMap, TranscriptEventType } from "@rivetplane/shared/model";
 
 interface Entry { session: Session; transcript: TranscriptEvent[]; next_seq: number }
@@ -13,6 +14,7 @@ export class SessionRegistry extends EventEmitter {
 
   upsert(session: Session): Session {
     const prior = this.#entries.get(session.id);
+    if (prior && isDeepStrictEqual(prior.session, session)) return structuredClone(prior.session);
     const entry: Entry = prior ? { ...prior, session: structuredClone(session) } : { session: structuredClone(session), transcript: [], next_seq: 1 };
     this.#entries.set(session.id, entry);
     this.emit("session", structuredClone(entry.session));
@@ -30,6 +32,7 @@ export class SessionRegistry extends EventEmitter {
 
   setPending(id: string, pending: PendingInteraction | null): void {
     const entry = this.#require(id);
+    if (isDeepStrictEqual(entry.session.pending, pending)) return;
     entry.session = { ...entry.session, pending, last_activity_at: new Date().toISOString() };
     this.emit("session", structuredClone(entry.session));
   }
