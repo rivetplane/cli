@@ -37,6 +37,7 @@ interface SessionCheckpoint {
   pending?: PendingInteraction;
 }
 interface CheckpointFile { version: 1; sessions: Record<string, SessionCheckpoint> }
+interface ExportFailureState { attempts: number; next_attempt_at: number }
 
 export interface OpenCodeExportDiscoveryOptions {
   executable?: string;
@@ -49,6 +50,8 @@ export interface OpenCodeExportDiscoveryOptions {
   index_interval_ms?: number;
   max_index_interval_ms?: number;
   timeout_ms?: number;
+  /** Timeout for the heavier `opencode export` command. */
+  export_timeout_ms?: number;
   max_output_bytes?: number;
   max_sessions?: number;
   max_exports_per_poll?: number;
@@ -57,6 +60,9 @@ export interface OpenCodeExportDiscoveryOptions {
   database_page_size?: number;
   max_database_pages?: number;
   concurrency?: number;
+  export_concurrency?: number;
+  export_retry_base_ms?: number;
+  max_export_retry_ms?: number;
   recent_window_ms?: number;
   runner?: CommandRunner;
   file_runner?: CommandRunner;
@@ -300,6 +306,7 @@ export class OpenCodeExportDiscovery {
   #diagnostics = new Set<string>();
   #nextIndexRefreshAt = 0;
   #indexFailures = 0;
+  #exportFailures = new Map<string, ExportFailureState>();
   #lastCandidateDiagnostic = "";
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: OpenCodeExportDiscoveryOptions = {}) {
@@ -326,6 +333,8 @@ export class OpenCodeExportDiscovery {
       const indexed = [...this.#index.values()].sort((a, b) => this.#updated(b) - this.#updated(a));
       const recentAfter = this.#now() - (this.options.recent_window_ms ?? 5 * 60_000);
       const eligible = indexed.filter((session) => {
+        const failure = this.#exportFailures.get(session.id);
+        if (failure && failure.next_attempt_at > this.#now()) return false;
         const current = this.registry.get(session.id); const pending = current?.pending ?? this.#checkpoints.sessions[session.id]?.pending;
         const probeChanged = this.#probeIds.has(session.id) && !this.#seenRuntime.has(session.id) && this.#checkpoints.sessions[session.id]?.updated !== session.updated;
         return Boolean(pending) || current?.status === "running" || this.#updated(session) >= recentAfter || probeChanged;
@@ -342,7 +351,7 @@ export class OpenCodeExportDiscovery {
       const exports = candidates.slice(0, this.#positiveLimit(this.options.max_exports_per_poll, 12, true));
       const candidateDiagnostic = `OpenCode export poll has ${eligible.length} active, recent, or probe candidates from ${indexed.length} indexed sessions; selected ${candidates.length} and exporting ${exports.length}`;
       if (candidateDiagnostic !== this.#lastCandidateDiagnostic) { this.#lastCandidateDiagnostic = candidateDiagnostic; this.registry.emit("log", candidateDiagnostic); }
-      await this.#mapLimit(exports, this.options.concurrency ?? 4, async (session) => this.#export(session, command, common));
+      await this.#mapLimit(exports, this.options.export_concurrency ?? 2, async (session) => this.#export(session, command, common));
       if (exports.length > 0) await this.#save();
     } catch (error) { this.#diagnostic(`OpenCode export discovery failed: ${error instanceof Error ? error.message : String(error)}`, true); }
     finally { this.#polling = false; }
@@ -486,9 +495,20 @@ export class OpenCodeExportDiscovery {
   async #export(listed: OpenCodeListSession, command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<void> {
     try {
       const fileCommand = this.options.file_runner ?? (this.options.runner ? command : runBoundedCommandToFile);
-      const output = await fileCommand(this.#executable!, [...(this.options.executable_args ?? []), "export", listed.id], common);
+      const output = await fileCommand(this.#executable!, [...(this.options.executable_args ?? []), "export", listed.id], {
+        ...common,
+        timeout_ms: this.#positiveLimit(this.options.export_timeout_ms, 30_000),
+      });
       const exported = parseSessionExport(output.stdout); this.#syncExport(listed, exported.info, exported.messages); this.#seenRuntime.add(listed.id);
-    } catch (error) { this.registry.emit("warning", new Error(`Cannot export OpenCode session ${listed.id}: ${error instanceof Error ? error.message : String(error)}`)); }
+      this.#exportFailures.delete(listed.id);
+    } catch (error) {
+      const attempts = Math.min((this.#exportFailures.get(listed.id)?.attempts ?? 0) + 1, 16);
+      const base = this.#positiveLimit(this.options.export_retry_base_ms, 30_000);
+      const maximum = this.#positiveLimit(this.options.max_export_retry_ms, 5 * 60_000);
+      const delay = Math.min(maximum, base * 2 ** Math.min(attempts - 1, 10));
+      this.#exportFailures.set(listed.id, { attempts, next_attempt_at: this.#now() + delay });
+      this.registry.emit("warning", new Error(`Cannot export OpenCode session ${listed.id}: ${error instanceof Error ? error.message : String(error)}; retrying in ${delay} ms`));
+    }
   }
   #syncExport(listed: OpenCodeListSession, info: RecordValue, messages: Array<{ info: RecordValue; parts: RecordValue[] }>): void {
     const id = string(info.id) ?? listed.id; if (id !== listed.id) throw new Error(`export session ID ${id} does not match ${listed.id}`);

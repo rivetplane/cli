@@ -108,10 +108,12 @@ test("detects only an explicit running permission request and clears its exact r
 });
 
 test("keeps polling after a malformed export and a command timeout", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-errors-")); let exportAttempt = 0; const warnings: string[] = [];
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-errors-")); let exportAttempt = 0; let now = 1_800_000_000_000; const warnings: string[] = []; const exportTimeouts: number[] = [];
   const valid = await fixture("export-question-running.json");
-  const runner: CommandRunner = async (_program, args) => {
+  const runner: CommandRunner = async (_program, args, options) => {
+    if (args[0] === "debug") return { stdout: JSON.stringify([{ id: "project", worktree: directory, sandboxes: [] }]), stderr: "" };
     if (args.includes("list")) return { stdout: JSON.stringify([{ id: "ses_question", directory, updated: 1 }]), stderr: "" };
+    exportTimeouts.push(options.timeout_ms);
     exportAttempt++;
     if (exportAttempt === 1) return { stdout: "{ partial", stderr: "" };
     if (exportAttempt === 2) throw new Error("OpenCode command timed out after 5 ms");
@@ -119,10 +121,30 @@ test("keeps polling after a malformed export and a command timeout", async () =>
   };
   try {
     const registry = new SessionRegistry(); registry.on("warning", (error) => warnings.push(String(error)));
-    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner, recent_window_ms: Number.MAX_SAFE_INTEGER });
-    await manager.poll(); await manager.poll(); await manager.poll();
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner, now: () => now, recent_window_ms: Number.MAX_SAFE_INTEGER });
+    await manager.poll(); await manager.poll(); assert.equal(exportAttempt, 1);
+    now += 30_000; await manager.poll(); assert.equal(exportAttempt, 2);
+    now += 59_999; await manager.poll(); assert.equal(exportAttempt, 2);
+    now += 1; await manager.poll(); assert.equal(exportAttempt, 3);
     assert.equal(warnings.some((value) => value.includes("malformed or partial JSON")), true); assert.equal(warnings.some((value) => value.includes("timed out")), true);
+    assert.equal(warnings.some((value) => value.includes("retrying in 30000 ms")), true); assert.equal(warnings.some((value) => value.includes("retrying in 60000 ms")), true);
+    assert.deepEqual(exportTimeouts, [30_000, 30_000, 30_000]);
     assert.equal(registry.get("ses_question")?.pending?.id, "call_question_1"); manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("limits concurrent OpenCode exports independently from index scans", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-export-concurrency-")); let active = 0; let peak = 0;
+  const sessions = Array.from({ length: 5 }, (_, index) => ({ id: `ses_${index}`, directory, updated: 10 - index }));
+  const runner: CommandRunner = async (_program, args) => {
+    if (args[0] === "debug") return { stdout: JSON.stringify([{ id: "project", worktree: directory, sandboxes: [] }]), stderr: "" };
+    if (args.includes("list")) return { stdout: JSON.stringify(sessions), stderr: "" };
+    active++; peak = Math.max(peak, active); await new Promise((resolve) => setTimeout(resolve, 5)); active--;
+    const id = String(args.at(-1)); return { stdout: JSON.stringify({ info: { id, directory, time: { created: 1, updated: 2 } }, messages: [] }), stderr: "" };
+  };
+  try {
+    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, recent_window_ms: Number.MAX_SAFE_INTEGER });
+    await manager.poll(); assert.equal(peak, 2); assert.equal(registry.list().length, 5); manager.stop();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
