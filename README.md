@@ -4,7 +4,7 @@ Rivetplane connects local ACP-compatible and OpenCode agent sessions to a remote
 
 ## Use Rivetplane
 
-Node.js 24 or later is required.
+Node.js 22 or later is required. Rivetplane tests and publishes releases on Node.js 24.
 
 ```sh
 npx rivetplane login
