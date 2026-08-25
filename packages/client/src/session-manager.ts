@@ -2,9 +2,28 @@ import type { AcpSessionDescriptor } from "./discovery.js";
 import { SessionDiscovery } from "./discovery.js";
 import { ACPAttach } from "./acp-attach.js";
 import { SessionRegistry } from "./registry.js";
+import type { CapabilitySupport } from "@rivetplane/shared/protocol";
 
 interface Managed { signature: string; attach: ACPAttach }
-export interface HarnessDiscoveryStatus { harness_type: string; discovered_sessions: number; attached_sessions: number }
+export interface HarnessDiscoveryStatus {
+  harness_type: string;
+  discovered_sessions: number;
+  attached_sessions: number;
+  version?: string;
+  capabilities?: {
+    persisted_discovery?: CapabilitySupport;
+    discovery: CapabilitySupport;
+    transcript: CapabilitySupport;
+    live_attachment?: CapabilitySupport;
+    messaging: CapabilitySupport;
+    interrupt?: CapabilitySupport;
+    question_response: CapabilitySupport;
+    approval_response: CapabilitySupport;
+    transport?: string;
+    managed?: boolean;
+    endpoint?: string | null;
+  };
+}
 
 export class SessionManager {
   readonly registry: SessionRegistry;

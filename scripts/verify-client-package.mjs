@@ -29,7 +29,7 @@ function run(command, args, options = {}) {
 
 async function runStartedClient(entrypoint, env) {
   return await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, [entrypoint, "--no-opencode", "--no-relay", "--local-port", "0"], {
+    const child = spawn(process.execPath, [entrypoint, "--no-opencode", "--no-codex", "--no-relay", "--local-port", "0"], {
       cwd: installDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -78,6 +78,8 @@ try {
   const help = run(binary, ["--help"], { cwd: installDirectory });
   assert.match(help, /Usage:\s+rivetplane/);
   assert.match(help, /rivetplane opencode/, "installed CLI does not document the managed OpenCode command");
+  assert.match(help, /rivetplane codex/, "installed CLI does not document the managed Codex command");
+  assert.match(help, /--no-codex/, "installed CLI does not document Codex rollout discovery");
   assert.equal(run(binary, ["--version"], { cwd: installDirectory }), packageJson.version);
   assert.match(run("npx", ["--yes", "--package", tarball, "rivetplane", "--help"], { cwd: npxDirectory }), /Usage:\s+rivetplane/);
 

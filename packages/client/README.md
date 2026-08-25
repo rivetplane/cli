@@ -19,6 +19,8 @@ Rivetplane uses an explicit scope limit of 200 and detects successful output tha
 
 Export discovery cannot resolve a Deferred in the original OpenCode process. Exported sessions are marked read-only. Answer questions and approvals in that original process. Use `npx rivetplane opencode` for the explicit managed server and attached-TUI mode, or `--opencode-url URL` for an existing OpenCode HTTP server. These direct modes keep full control support.
 
+Rivetplane also reads persisted Codex rollout files from `~/.codex/sessions`, independent of the current directory. These sessions are read-only. A rollout file is not evidence that an independently launched stdio process is attached. Run `npx rivetplane codex` for a managed app-server with messages, streamed transcripts, interrupts, command and file approvals, supported questions, and restart recovery. It uses a protected Unix socket on macOS and Linux and an authenticated loopback WebSocket on Windows. A configured shared listener can use `--codex-endpoint`; its token must be in `HARNESS_CP_CODEX_TOKEN`.
+
 Run `npx rivetplane --help` for all options.
 
 Source and release instructions are in the [Rivetplane CLI repository](https://github.com/rivetplane/cli).

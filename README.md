@@ -37,6 +37,14 @@ npx rivetplane opencode
 
 Managed and direct HTTP sessions support messages, interrupts, approvals, and questions. The default export adapter does not start a server or TUI.
 
+## Codex sessions
+
+Rivetplane reads Codex rollout JSONL files from `~/.codex/sessions` by default. This discovery does not depend on the current directory. It reports persisted and recently active sessions as read-only. It does not claim that a rollout is attached to a live process. Rivetplane cannot attach to an independently launched `codex app-server` process that uses stdio because that process owns its pipes.
+
+Run `npx rivetplane codex` to start a Rivetplane-managed Codex app-server. This mode supports session creation and recovery, streamed transcripts, messages, interrupts, command and file approvals, and supported user-input questions. It uses a permission-protected Unix socket on macOS and Linux. It uses an authenticated loopback WebSocket on Windows. Rivetplane stops only the app-server process that it starts.
+
+Use `--codex-endpoint URL` to connect to a supported shared listener. Put its bearer token in `HARNESS_CP_CODEX_TOKEN`; do not put the token on the command line. Use `--codex-sessions-dir`, `--codex-checkpoint`, `--codex-directory`, or `--codex-executable` to change the local defaults. Use `--no-codex` to disable rollout discovery.
+
 Run `npx rivetplane --help` to see all options.
 
 ## Develop

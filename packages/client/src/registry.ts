@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import type { PendingInteraction, Session, SessionStatus, TranscriptEvent, TranscriptEventPayloadMap, TranscriptEventType } from "@rivetplane/shared/model";
 
-interface Entry { session: Session; transcript: TranscriptEvent[]; next_seq: number }
+interface Entry { session: Session; transcript: TranscriptEvent[]; event_ids: Map<string, TranscriptEvent>; next_seq: number }
 
 export class SessionRegistry extends EventEmitter {
   #entries = new Map<string, Entry>();
@@ -13,7 +13,7 @@ export class SessionRegistry extends EventEmitter {
 
   upsert(session: Session): Session {
     const prior = this.#entries.get(session.id);
-    const entry: Entry = prior ? { ...prior, session: structuredClone(session) } : { session: structuredClone(session), transcript: [], next_seq: 1 };
+    const entry: Entry = prior ? { ...prior, session: structuredClone(session) } : { session: structuredClone(session), transcript: [], event_ids: new Map(), next_seq: 1 };
     this.#entries.set(session.id, entry);
     this.emit("session", structuredClone(entry.session));
     return structuredClone(entry.session);
@@ -36,8 +36,13 @@ export class SessionRegistry extends EventEmitter {
 
   append<T extends TranscriptEventType>(id: string, type: T, payload: TranscriptEventPayloadMap[T], source?: { id?: string; ts?: string }): TranscriptEvent {
     const entry = this.#require(id);
+    if (source?.id) {
+      const existing = entry.event_ids.get(source.id);
+      if (existing) return structuredClone(existing);
+    }
     const event = { id: source?.id ?? randomUUID(), session_id: id, seq: entry.next_seq++, ts: source?.ts ?? new Date().toISOString(), type, payload } as TranscriptEvent;
     entry.transcript.push(event);
+    entry.event_ids.set(event.id, event);
     entry.session = { ...entry.session, last_activity_at: event.ts };
     this.emit("transcript", structuredClone(event));
     return structuredClone(event);
