@@ -88,7 +88,7 @@ test("does not infer an approval from an unrelated running tool", async () => {
   const exportValue = { info: { id: "ses_bash", directory, time: { created: 1, updated: 2 } }, messages: [{ info: { id: "m1", role: "assistant", time: { created: 1 } }, parts: [{ id: "p1", type: "tool", callID: "bash-1", tool: "bash", state: { status: "running", input: { command: "npm test" }, time: { start: 1 } } }] }] };
   const runner: CommandRunner = async (_program, args) => ({ stdout: args.includes("list") ? JSON.stringify([{ id: "ses_bash", directory, created: 1, updated: 2 }]) : JSON.stringify(exportValue), stderr: "" });
   try {
-    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner });
+    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner, recent_window_ms: Number.MAX_SAFE_INTEGER });
     await manager.poll(); assert.equal(registry.get("ses_bash")?.pending, null); assert.equal(registry.get("ses_bash")?.status, "running"); manager.stop();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -108,17 +108,18 @@ test("detects only an explicit running permission request and clears its exact r
 });
 
 test("keeps polling after a malformed export and a command timeout", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-errors-")); let attempt = 0; const warnings: string[] = [];
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-errors-")); let exportAttempt = 0; const warnings: string[] = [];
   const valid = await fixture("export-question-running.json");
   const runner: CommandRunner = async (_program, args) => {
-    if (args.includes("list")) return { stdout: JSON.stringify([{ id: "ses_question", directory, updated: ++attempt }]), stderr: "" };
-    if (attempt === 1) return { stdout: "{ partial", stderr: "" };
-    if (attempt === 2) throw new Error("OpenCode command timed out after 5 ms");
+    if (args.includes("list")) return { stdout: JSON.stringify([{ id: "ses_question", directory, updated: 1 }]), stderr: "" };
+    exportAttempt++;
+    if (exportAttempt === 1) return { stdout: "{ partial", stderr: "" };
+    if (exportAttempt === 2) throw new Error("OpenCode command timed out after 5 ms");
     return { stdout: valid, stderr: "" };
   };
   try {
     const registry = new SessionRegistry(); registry.on("warning", (error) => warnings.push(String(error)));
-    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner });
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner, recent_window_ms: Number.MAX_SAFE_INTEGER });
     await manager.poll(); await manager.poll(); await manager.poll();
     assert.equal(warnings.some((value) => value.includes("malformed or partial JSON")), true); assert.equal(warnings.some((value) => value.includes("timed out")), true);
     assert.equal(registry.get("ses_question")?.pending?.id, "call_question_1"); manager.stop();
@@ -154,7 +155,7 @@ test("detects successful output truncated at exactly 64 KiB and retries with fil
     return { stdout: JSON.stringify([{ id: "ses_large", directory, created: 1, updated: 2 }]), stderr: "" };
   };
   try {
-    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner });
+    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner, recent_window_ms: Number.MAX_SAFE_INTEGER });
     await manager.poll(); assert.equal(registry.get("ses_large")?.id, "ses_large"); assert.equal(fileCalls, 2); manager.stop();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -177,6 +178,55 @@ test("uses bounded database pages when a project scope reaches its safe list lim
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("caches thousands of indexed sessions across repeated transcript polls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-large-index-")); let now = 1_800_000_000_000; let projectCalls = 0; let listCalls = 0; let databaseCalls = 0; let exportCalls = 0;
+  const indexed = Array.from({ length: 2_501 }, (_, index) => ({ id: `ses_${String(index).padStart(4, "0")}`, directory, created: now - 700_000, updated: now - 600_000 - index }));
+  const runner: CommandRunner = async (_program, args) => {
+    if (args[0] === "debug") { projectCalls++; return { stdout: JSON.stringify([{ id: "project", worktree: directory, sandboxes: [] }]), stderr: "" }; }
+    if (args.includes("list")) { listCalls++; return { stdout: JSON.stringify(indexed.slice(0, 200)), stderr: "" }; }
+    throw new Error(`unexpected command ${args.join(" ")}`);
+  };
+  const fileRunner: CommandRunner = async (_program, args) => {
+    if (args[0] === "db") { databaseCalls++; const offset = Number(/OFFSET (\d+)/.exec(String(args[1]))?.[1] ?? 0); return { stdout: JSON.stringify(indexed.slice(offset, offset + 1_000)), stderr: "" }; }
+    exportCalls++; const id = String(args.at(-1)); return { stdout: JSON.stringify({ info: { id, directory, time: { created: now - 10_000, updated: now } }, messages: [] }), stderr: "" };
+  };
+  try {
+    const logs: string[] = []; const registry = new SessionRegistry(); registry.on("log", (message) => logs.push(String(message)));
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner, now: () => now, index_interval_ms: 60_000, max_exports_per_poll: 4, max_export_candidates: 16 });
+    await manager.poll(); assert.equal(registry.list().length, 2_501); assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 4);
+    for (let poll = 0; poll < 5; poll++) { now += 2_000; await manager.poll(); }
+    assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 16);
+    assert.equal(logs.some((message) => message.includes("index refresh completed in") && message.includes("2501 cached sessions")), true);
+    assert.equal(logs.some((message) => message.includes("16 active, recent, or probe candidates") && message.includes("selected 16") && message.includes("exporting 4")), true);
+    assert.equal(logs.some((message) => message.includes("0 active, recent, or probe candidates") && message.includes("exporting 0")), true); manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("finds a new pending session within the configured index refresh bound", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-refresh-bound-")); let now = 1_800_000_000_000; let visible = false; let listCalls = 0; const questionExport = await fixture("export-question-running.json");
+  const runner: CommandRunner = async (_program, args) => {
+    if (args[0] === "debug") return { stdout: JSON.stringify([{ id: "project", worktree: directory, sandboxes: [] }]), stderr: "" };
+    if (args.includes("list")) { listCalls++; return { stdout: JSON.stringify(visible ? [{ id: "ses_question", directory, created: now, updated: now }] : []), stderr: "" }; }
+    return { stdout: questionExport, stderr: "" };
+  };
+  try {
+    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, now: () => now, index_interval_ms: 60_000 });
+    await manager.poll(); visible = true; now += 59_999; await manager.poll(); assert.equal(listCalls, 1); assert.equal(registry.get("ses_question"), undefined);
+    now += 1; await manager.poll(); assert.equal(listCalls, 2); assert.equal(registry.get("ses_question")?.pending?.id, "call_question_1"); assert.equal(registry.get("ses_question")?.status, "waiting_input"); manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("backs off after a partial index refresh", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-index-backoff-")); let now = 1_800_000_000_000; let projectCalls = 0; const warnings: string[] = [];
+  const runner: CommandRunner = async (_program, args) => { if (args[0] === "debug") projectCalls++; throw new Error("index command failed"); };
+  try {
+    const registry = new SessionRegistry(); registry.on("warning", (warning) => warnings.push(String(warning)));
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, now: () => now, index_interval_ms: 60_000 });
+    await manager.poll(); assert.equal(projectCalls, 1); now += 119_999; await manager.poll(); assert.equal(projectCalls, 1);
+    now += 1; await manager.poll(); assert.equal(projectCalls, 2); assert.equal(warnings.some((warning) => warning.includes("index refresh backoff is 120000 ms")), true); manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("bounds command time and output and cleans up the subprocess", async () => {
   await assert.rejects(runBoundedCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: process.cwd(), timeout_ms: 30, max_output_bytes: 1_024 }), /timed out/);
   await assert.rejects(runBoundedCommand(process.execPath, ["-e", "process.stdout.write('x'.repeat(4096))"], { cwd: process.cwd(), timeout_ms: 2_000, max_output_bytes: 100 }), /output exceeded/);
@@ -193,7 +243,7 @@ test("runs list, export, update, and disappearance through a fake OpenCode execu
     const projects = [{ id: "fake-project", worktree: directory, sandboxes: [] }];
     await writeFile(fakePath, fake, "utf8"); await writeFile(statePath, JSON.stringify({ projects, sessions: [{ id: "ses_question", directory, updated: 1 }], exports: { ses_question: running } }), "utf8");
     const registry = new SessionRegistry(); const removed: string[] = []; registry.on("removed", (id) => removed.push(String(id)));
-    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, executable_args: [fakePath, statePath], checkpoint_path: checkpoint, directory, timeout_ms: 2_000 });
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, executable_args: [fakePath, statePath], checkpoint_path: checkpoint, directory, timeout_ms: 2_000, index_interval_ms: 0, recent_window_ms: Number.MAX_SAFE_INTEGER });
     await manager.poll(); assert.equal(registry.get("ses_question")?.pending?.id, "call_question_1");
     await writeFile(statePath, JSON.stringify({ projects, sessions: [{ id: "ses_question", directory, updated: 2 }], exports: { ses_question: completed } }), "utf8");
     await manager.poll(); assert.equal(registry.get("ses_question")?.pending, null);

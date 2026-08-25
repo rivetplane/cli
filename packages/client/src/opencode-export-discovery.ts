@@ -45,10 +45,14 @@ export interface OpenCodeExportDiscoveryOptions {
   directory?: string;
   checkpoint_path?: string;
   interval_ms?: number;
+  /** Full machine index refresh interval. The first refresh is immediate. */
+  index_interval_ms?: number;
+  max_index_interval_ms?: number;
   timeout_ms?: number;
   max_output_bytes?: number;
   max_sessions?: number;
   max_exports_per_poll?: number;
+  max_export_candidates?: number;
   max_sessions_per_project?: number;
   database_page_size?: number;
   max_database_pages?: number;
@@ -58,6 +62,7 @@ export interface OpenCodeExportDiscoveryOptions {
   file_runner?: CommandRunner;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
+  now?: () => number;
 }
 
 function object(value: unknown): RecordValue | undefined {
@@ -289,8 +294,13 @@ export class OpenCodeExportDiscovery {
   #loaded = false;
   #checkpoints: CheckpointFile = { version: 1, sessions: {} };
   #present = new Set<string>();
+  #index = new Map<string, OpenCodeListSession>();
+  #probeIds = new Set<string>();
   #seenRuntime = new Set<string>();
   #diagnostics = new Set<string>();
+  #nextIndexRefreshAt = 0;
+  #indexFailures = 0;
+  #lastCandidateDiagnostic = "";
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: OpenCodeExportDiscoveryOptions = {}) {
     this.directory = options.directory ?? process.cwd();
@@ -312,36 +322,71 @@ export class OpenCodeExportDiscovery {
       this.#executable ??= await resolveOpenCodeExecutable(this.options);
       if (!this.#executable) { this.#diagnostic("OpenCode executable was not found; export discovery is inactive"); return; }
       const command = this.options.runner ?? runBoundedCommand; const common = this.#commandOptions();
-      const scopes = await this.#projectScopes(command, common);
-      const listedResult = await this.#listAllScopes(scopes.directories, command, common);
-      let listed = listedResult.sessions; let databaseAuthoritative = false;
-      if (scopes.requiresIndex || !scopes.complete || !listedResult.authoritative || listedResult.saturated) {
-        try {
-          listed = this.#mergeSessions(listed, await this.#listDatabasePages(common)); databaseAuthoritative = true;
-          this.#diagnostic(`OpenCode used the bounded database-index fallback and found ${listed.length} unique root sessions`);
-        } catch (error) {
-          this.#diagnostic(`OpenCode database-index fallback failed; discovery coverage is partial: ${error instanceof Error ? error.message : String(error)}`, true);
-        }
-      }
-      listed.sort((a, b) => this.#updated(b) - this.#updated(a));
-      const next = new Set(listed.map((session) => session.id));
-      const authoritative = databaseAuthoritative || (scopes.complete && listedResult.authoritative && !listedResult.saturated);
-      if (authoritative) for (const id of this.#present) if (!next.has(id)) this.registry.remove(id);
-      this.#present = authoritative ? next : new Set([...this.#present, ...next]);
-      for (const session of listed) this.#upsertListSnapshot(session);
-      const recentAfter = Date.now() - (this.options.recent_window_ms ?? 5 * 60_000);
-      const changed = listed.filter((session) => !this.#seenRuntime.has(session.id) || this.#checkpoints.sessions[session.id]?.updated !== session.updated);
-      const recent = listed.filter((session) => !changed.includes(session) && this.#updated(session) >= recentAfter);
-      const exports = [...changed, ...recent].slice(0, this.options.max_exports_per_poll ?? 12);
-      if (changed.length + recent.length > exports.length) this.#diagnostic(`OpenCode export poll limited ${changed.length + recent.length} candidates to ${exports.length}; remaining sessions will be retried`);
+      if (this.#now() >= this.#nextIndexRefreshAt) await this.#refreshIndex(command, common);
+      const indexed = [...this.#index.values()].sort((a, b) => this.#updated(b) - this.#updated(a));
+      const recentAfter = this.#now() - (this.options.recent_window_ms ?? 5 * 60_000);
+      const eligible = indexed.filter((session) => {
+        const current = this.registry.get(session.id); const pending = current?.pending ?? this.#checkpoints.sessions[session.id]?.pending;
+        const probeChanged = this.#probeIds.has(session.id) && !this.#seenRuntime.has(session.id) && this.#checkpoints.sessions[session.id]?.updated !== session.updated;
+        return Boolean(pending) || current?.status === "running" || this.#updated(session) >= recentAfter || probeChanged;
+      });
+      const candidateLimit = this.#positiveLimit(this.options.max_export_candidates, 48);
+      const priority = (session: OpenCodeListSession): number => {
+        const current = this.registry.get(session.id);
+        if (current?.pending ?? this.#checkpoints.sessions[session.id]?.pending) return 3;
+        if (current?.status === "running") return 2;
+        if (!this.#seenRuntime.has(session.id) || this.#checkpoints.sessions[session.id]?.updated !== session.updated) return 1;
+        return 0;
+      };
+      const candidates = eligible.sort((a, b) => priority(b) - priority(a) || this.#updated(b) - this.#updated(a)).slice(0, candidateLimit);
+      const exports = candidates.slice(0, this.#positiveLimit(this.options.max_exports_per_poll, 12, true));
+      const candidateDiagnostic = `OpenCode export poll has ${eligible.length} active, recent, or probe candidates from ${indexed.length} indexed sessions; selected ${candidates.length} and exporting ${exports.length}`;
+      if (candidateDiagnostic !== this.#lastCandidateDiagnostic) { this.#lastCandidateDiagnostic = candidateDiagnostic; this.registry.emit("log", candidateDiagnostic); }
       await this.#mapLimit(exports, this.options.concurrency ?? 4, async (session) => this.#export(session, command, common));
-      await this.#save();
+      if (exports.length > 0) await this.#save();
     } catch (error) { this.#diagnostic(`OpenCode export discovery failed: ${error instanceof Error ? error.message : String(error)}`, true); }
     finally { this.#polling = false; }
   }
 
   #commandOptions(): { cwd: string; timeout_ms: number; max_output_bytes: number } {
     return { cwd: this.directory, timeout_ms: this.options.timeout_ms ?? 10_000, max_output_bytes: this.options.max_output_bytes ?? 16 * 1024 * 1024 };
+  }
+  #now(): number { return this.options.now?.() ?? Date.now(); }
+  #positiveLimit(value: number | undefined, fallback: number, allowZero = false): number {
+    if (Number.isSafeInteger(value) && (allowZero ? value! >= 0 : value! > 0)) return value!;
+    return fallback;
+  }
+  #indexInterval(): number { return this.#positiveLimit(this.options.index_interval_ms, 60_000, true); }
+  async #refreshIndex(command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<void> {
+    const started = this.#now(); const scopes = await this.#projectScopes(command, common);
+    const listedResult = await this.#listAllScopes(scopes.directories, command, common);
+    let listed = listedResult.sessions; let databaseAuthoritative = false;
+    if (scopes.requiresIndex || !scopes.complete || !listedResult.authoritative || listedResult.saturated) {
+      try {
+        listed = this.#mergeSessions(listed, await this.#listDatabasePages(common)); databaseAuthoritative = true;
+        this.#diagnostic(`OpenCode used the bounded database-index fallback and found ${listed.length} unique root sessions`);
+      } catch (error) {
+        this.#diagnostic(`OpenCode database-index fallback failed; discovery coverage is partial: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+    listed.sort((a, b) => this.#updated(b) - this.#updated(a));
+    const authoritative = databaseAuthoritative || (scopes.complete && listedResult.authoritative && !listedResult.saturated);
+    const next = authoritative ? new Map<string, OpenCodeListSession>() : new Map(this.#index);
+    for (const session of listed) next.set(session.id, session);
+    if (authoritative) for (const id of this.#present) if (!next.has(id)) this.registry.remove(id);
+    this.#index = next; this.#present = new Set(next.keys());
+    this.#probeIds = new Set([...next.values()].sort((a, b) => this.#updated(b) - this.#updated(a)).slice(0, this.#positiveLimit(this.options.max_export_candidates, 48)).map((session) => session.id));
+    for (const session of listed) this.#upsertListSnapshot(session);
+
+    const duration = Math.max(0, this.#now() - started); const base = this.#indexInterval();
+    const maximum = this.#positiveLimit(this.options.max_index_interval_ms, 5 * 60_000);
+    this.#indexFailures = authoritative ? 0 : Math.min(this.#indexFailures + 1, 6);
+    const slowDelay = base === 0 ? 0 : Math.min(maximum, Math.max(base, duration * 4));
+    const failureDelay = Math.min(maximum, base * 2 ** this.#indexFailures);
+    const delay = Math.max(slowDelay, failureDelay); this.#nextIndexRefreshAt = this.#now() + delay;
+    this.registry.emit("log", `OpenCode index refresh ${authoritative ? "completed" : "was partial"} in ${duration} ms with ${this.#index.size} cached sessions; next refresh in ${delay} ms`);
+    if (!authoritative) this.registry.emit("warning", new Error(`OpenCode index refresh backoff is ${delay} ms after ${this.#indexFailures} consecutive partial refresh${this.#indexFailures === 1 ? "" : "es"}`));
+    else if (delay > base) this.registry.emit("log", `OpenCode index refresh used a ${delay} ms slow-scan backoff`);
   }
   async #projectScopes(command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<{ directories: string[]; complete: boolean; requiresIndex: boolean }> {
     const scopes = new Set([this.directory]); let complete = true; let requiresIndex = false;
