@@ -48,16 +48,9 @@ export async function writeCredentials(credentials: Credentials, path = credenti
 
 export interface LoginOptions { server_url: string; machine_name?: string; open_browser?: (url: string) => Promise<void>; timeout_ms?: number; credentials_path?: string; device_identity_path?: string }
 
-export function browserLaunch(platform: NodeJS.Platform, url: string): { command: string; args: string[] } {
-  if (platform === "darwin") return { command: "open", args: [url] };
-  if (platform === "win32") return { command: "explorer.exe", args: [url] };
-  return { command: "xdg-open", args: [url] };
-}
-
 async function defaultOpenBrowser(url: string): Promise<void> {
-  const { spawn } = await import("node:child_process");
-  const { command, args } = browserLaunch(process.platform, url);
-  const child = spawn(command, args, { detached: true, stdio: "ignore" }); child.unref();
+  const { default: open } = await import("open");
+  await open(url);
 }
 
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
