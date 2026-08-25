@@ -17,7 +17,7 @@
         "rivetplane": "dist/cli.js",
       },
       "dependencies": {
-        "@opencode-ai/sdk": "^1.18.21",
+        "@opencode-ai/sdk": "^1.18.23",
         "open": "^11.0.1",
         "ws": "^8.21.0",
       },
@@ -31,7 +31,7 @@
     },
   },
   "packages": {
-    "@opencode-ai/sdk": ["@opencode-ai/sdk@1.18.21", "", { "dependencies": { "cross-spawn": "7.0.6" } }, "sha512-k6iHQ5C8wOPglk+LgFyYnst168cGMQYumgpbVoeXJ+iC1AtvwD5zmjuF8CxMze/y9G1K2bOeO6p9yRvA7eHZLA=="],
+    "@opencode-ai/sdk": ["@opencode-ai/sdk@1.18.23", "", { "dependencies": { "cross-spawn": "7.0.6" } }, "sha512-VouYbL8O2ynLq0atr5fjzCv8YLtFi/zKLQ/uYkCvTJ4CmUdA01XwPn8om+u3TvxnGEfQsBfmThGU141vt3sg5w=="],
 
     "@rivetplane/shared": ["@rivetplane/shared@workspace:packages/shared"],
 
