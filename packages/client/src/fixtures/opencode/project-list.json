@@ -1,0 +1,22 @@
+[
+  {
+    "id": "project-a",
+    "worktree": "/projects/a",
+    "vcs": "git",
+    "time": { "created": 1787659000000, "updated": 1787659200000 },
+    "sandboxes": []
+  },
+  {
+    "id": "project-b",
+    "worktree": "/projects/b",
+    "vcs": "git",
+    "time": { "created": 1787659000000, "updated": 1787659200000 },
+    "sandboxes": ["/projects/b-sandbox"]
+  },
+  {
+    "id": "global",
+    "worktree": "/",
+    "time": { "created": 1787659000000, "updated": 1787659200000 },
+    "sandboxes": []
+  }
+]

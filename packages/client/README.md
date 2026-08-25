@@ -1,6 +1,6 @@
 # Rivetplane CLI
 
-Rivetplane connects local ACP-compatible and OpenCode agent sessions to a remote control plane. The client starts all remote connections. It does not open an internet-facing port. When OpenCode is installed, Rivetplane starts a loopback-only OpenCode server on an available port and manages its lifetime.
+Rivetplane connects local ACP-compatible and OpenCode agent sessions to a remote control plane. The client starts all remote connections. It does not open an internet-facing port or start OpenCode by default.
 
 ## Use the client
 
@@ -11,9 +11,13 @@ npx rivetplane login
 npx rivetplane
 ```
 
-The login command uses `https://rivetplane.com`, opens the control plane in your browser, and stores a machine-scoped token in your user configuration directory. In an interactive terminal, the second command starts ACP discovery, the local API, the outbound relay, and an OpenCode TUI attached to Rivetplane's managed OpenCode server. Keep it running while you use the control plane. Use `--no-opencode-tui` for background-only relay mode and `--server` only for a self-hosted control plane.
+The login command uses `https://rivetplane.com`, opens the control plane in your browser, and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, read-only OpenCode export discovery, the local API, and the outbound relay. Keep it running while you use the control plane. Use `--server` only for a self-hosted control plane.
 
-An independent `opencode` process uses a separate internal runtime, so Rivetplane cannot observe its process-local approvals or questions. The explicit `npx rivetplane opencode` command remains available for scripts that require attached-TUI mode even when terminal detection is unavailable.
+When `opencode` is on `PATH`, Rivetplane uses `opencode debug scrap` to list known projects. It scans the seed directory, each accessible project worktree, and the global bucket. It combines session results by ID. `--opencode-directory` is a seed, not a project filter. The full index scan runs immediately and every 60 seconds by default. `--opencode-index-interval SECONDS` changes this normal bound. The 2-second transcript poll uses the cached index. It selects at most 48 active, recent, or probe sessions and exports at most 12 per poll, with priority for running sessions and pending requests. The startup probe is limited to the 48 most recently updated sessions. Old sessions remain listed, but other old transcripts are not exported automatically. Slow scans and partial failures increase the next index delay, up to five minutes. Diagnostics give the scan duration, backoff, candidate count, and export count.
+
+Rivetplane uses an explicit scope limit of 200 and detects successful output that is invalid or stops at exactly 65,536 bytes. Full scopes use bounded pages through `opencode db` as a documented, schema-dependent compatibility fallback. A bounded file-backed retry protects large list and export output from pipe truncation. It relays stable transcript diffs and can detect running question tools and supported explicit permission requests. It uses no server, `jq`, or direct SQLite file access. Compact checkpoints in `~/.config/harness-cp/opencode-export-checkpoints.json` prevent replay after a restart.
+
+Export discovery cannot resolve a Deferred in the original OpenCode process. Exported sessions are marked read-only. Answer questions and approvals in that original process. Use `npx rivetplane opencode` for the explicit managed server and attached-TUI mode, or `--opencode-url URL` for an existing OpenCode HTTP server. These direct modes keep full control support.
 
 Run `npx rivetplane --help` for all options.
 

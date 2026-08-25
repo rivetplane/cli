@@ -11,16 +11,19 @@ const { version } = require("../package.json") as { version: string };
 const HELP = `Rivetplane local client
 
 Usage:
-  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-url URL] [--opencode-directory PATH] [--no-opencode] [--no-opencode-tui] [--no-relay]
+  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-index-interval SECONDS] [--opencode-max-sessions-per-project COUNT] [--no-opencode] [--no-opencode-export] [--no-relay]
+  rivetplane --opencode-url URL [client options]
   rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
   rivetplane --help
 
-The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, starts a
-loopback-only OpenCode server when OpenCode is installed, and exposes the local API at
-http://127.0.0.1:PORT/v1. In an interactive terminal, it opens an OpenCode TUI attached
-to that managed server. Use --no-opencode-tui for background-only relay mode. Login uses
-https://rivetplane.com unless --server or HARNESS_CP_SERVER selects a self-hosted control plane.`;
+The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, and reads existing
+OpenCode sessions with 'opencode session list' and 'opencode export'. Export discovery
+is read-only. It can show pending questions, but it cannot answer them in the original
+process. The machine index refreshes every 60 seconds by default. The 2-second
+transcript poll uses the cached index. The client does not start OpenCode by default. Use 'rivetplane opencode' for
+the managed server and attached TUI mode. Login uses https://rivetplane.com unless
+--server or HARNESS_CP_SERVER selects a self-hosted control plane.`;
 
 function flag(name: string): string | undefined { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }
 
@@ -41,25 +44,35 @@ async function main(): Promise<void> {
   }
 
   const explicitOpenCode = process.argv[2] === "opencode";
-  const attachOpenCode = explicitOpenCode || (!process.argv.includes("--no-opencode-tui") && process.stdin.isTTY && process.stdout.isTTY);
+  const attachOpenCode = explicitOpenCode;
   const credentials = await readCredentials();
   const discoveryDirectory = flag("--discovery-dir");
   const localPort = Number(flag("--local-port") ?? process.env.HARNESS_CP_LOCAL_PORT ?? 41737);
   if (!Number.isInteger(localPort) || localPort < 0 || localPort > 65_535) throw new Error("--local-port must be a valid port");
+  const maxOpenCodeSessions = Number(flag("--opencode-max-sessions-per-project") ?? process.env.HARNESS_CP_OPENCODE_MAX_SESSIONS_PER_PROJECT ?? 200);
+  if (!Number.isSafeInteger(maxOpenCodeSessions) || maxOpenCodeSessions <= 0) throw new Error("--opencode-max-sessions-per-project must be a positive integer");
+  const openCodeIndexIntervalSeconds = Number(flag("--opencode-index-interval") ?? process.env.HARNESS_CP_OPENCODE_INDEX_INTERVAL_SECONDS ?? 60);
+  if (!Number.isSafeInteger(openCodeIndexIntervalSeconds) || openCodeIndexIntervalSeconds <= 0) throw new Error("--opencode-index-interval must be a positive integer number of seconds");
   const client = new HarnessControlClient({
     ...(credentials ? { credentials } : {}),
     ...(discoveryDirectory ? { discovery_directory: discoveryDirectory } : {}),
     local_port: localPort,
     relay: !process.argv.includes("--no-relay"),
     opencode_url: process.argv.includes("--no-opencode") ? false : (flag("--opencode-url") ?? process.env.HARNESS_CP_OPENCODE_URL),
+    opencode_managed: explicitOpenCode,
+    opencode_export: !process.argv.includes("--no-opencode-export") && !process.argv.includes("--no-opencode") && !explicitOpenCode && !flag("--opencode-url") && !process.env.HARNESS_CP_OPENCODE_URL,
     opencode_directory: flag("--opencode-directory") ?? process.env.HARNESS_CP_OPENCODE_DIRECTORY ?? process.cwd(),
+    opencode_executable: flag("--opencode-executable") ?? process.env.HARNESS_CP_OPENCODE_EXECUTABLE,
+    opencode_checkpoint_path: flag("--opencode-checkpoint") ?? process.env.HARNESS_CP_OPENCODE_CHECKPOINT,
+    opencode_max_sessions_per_project: maxOpenCodeSessions,
+    opencode_index_interval_ms: openCodeIndexIntervalSeconds * 1_000,
   });
   client.manager.registry.on("log", (message) => process.stderr.write(`${String(message)}\n`));
   const started = await client.start();
   process.stdout.write(`Local API: http://127.0.0.1:${started.local_port}/v1\n`);
   process.stdout.write(credentials && !process.argv.includes("--no-relay") ? `Relay: ${credentials.server_url}\n` : "Relay: disabled (run rivetplane login to pair this machine)\n");
   const harnesses = client.harnesses();
-  if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode: ${client.opencode ? `${client.opencode.url} for ${client.opencode.directory}` : "disabled"})\n`);
+  if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode export: ${client.opencode_exports?.executable ?? "not found"}; managed OpenCode: ${client.opencode ? client.opencode.url : "disabled"})\n`);
   else for (const harness of harnesses) process.stdout.write(`Harness: ${harness.harness_type} (${harness.attached_sessions}/${harness.discovered_sessions} sessions attached)\n`);
   let stopping = false;
   let attachedProcess: ChildProcess | undefined;

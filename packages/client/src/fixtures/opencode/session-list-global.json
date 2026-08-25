@@ -1,0 +1,16 @@
+[
+  {
+    "id": "ses_global",
+    "title": "Global",
+    "directory": "__GLOBAL__",
+    "created": 1,
+    "updated": 10
+  },
+  {
+    "id": "ses_global",
+    "title": "Duplicate global row",
+    "directory": "__GLOBAL__",
+    "created": 1,
+    "updated": 10
+  }
+]
