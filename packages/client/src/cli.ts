@@ -11,7 +11,7 @@ const { version } = require("../package.json") as { version: string };
 const HELP = `Rivetplane local client
 
 Usage:
-  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-index-interval SECONDS] [--opencode-export-timeout SECONDS] [--opencode-export-concurrency COUNT] [--opencode-max-sessions-per-project COUNT] [--no-opencode] [--no-opencode-export] [--no-relay]
+  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-index-interval SECONDS] [--opencode-export-timeout SECONDS] [--opencode-export-concurrency COUNT] [--opencode-max-sessions-per-project COUNT] [--claude-executable PATH] [--claude-config-dir PATH] [--claude-checkpoint PATH] [--no-claude-code] [--no-opencode] [--no-opencode-export] [--no-relay]
   rivetplane --opencode-url URL [client options]
   rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
@@ -21,7 +21,10 @@ The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, and reads exi
 OpenCode sessions with 'opencode session list' and 'opencode export'. Export discovery
 is read-only. It can show pending questions, but it cannot answer them in the original
 process. The machine index refreshes every 60 seconds by default. The 2-second
-transcript poll uses the cached index. The client does not start OpenCode by default. Use 'rivetplane opencode' for
+transcript poll uses the cached index. Claude Code sessions are discovered machine-wide
+with 'claude agents --json'. Their JSONL transcripts and exact-ID pending records are
+read-only because Claude has no documented local exact-ID reply API. Private cc-socks
+are never used. The client does not start OpenCode by default. Use 'rivetplane opencode' for
 the managed server and attached TUI mode. Login uses https://rivetplane.com unless
 --server or HARNESS_CP_SERVER selects a self-hosted control plane.`;
 
@@ -72,6 +75,10 @@ async function main(): Promise<void> {
     opencode_index_interval_ms: openCodeIndexIntervalSeconds * 1_000,
     opencode_export_timeout_ms: openCodeExportTimeoutSeconds * 1_000,
     opencode_export_concurrency: openCodeExportConcurrency,
+    claude_code: !process.argv.includes("--no-claude-code"),
+    claude_executable: flag("--claude-executable") ?? process.env.HARNESS_CP_CLAUDE_EXECUTABLE,
+    claude_config_dir: flag("--claude-config-dir") ?? process.env.CLAUDE_CONFIG_DIR,
+    claude_checkpoint_path: flag("--claude-checkpoint") ?? process.env.HARNESS_CP_CLAUDE_CHECKPOINT,
   });
   client.manager.registry.on("log", (message) => process.stderr.write(`${String(message)}\n`));
   const started = await client.start();

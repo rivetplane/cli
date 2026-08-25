@@ -1,5 +1,6 @@
 export * from "./acp-attach.js";
 export * from "./client.js";
+export * from "./claude-code-discovery.js";
 export * from "./credentials.js";
 export * from "./discovery.js";
 export * from "./local-api.js";

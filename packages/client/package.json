@@ -7,7 +7,8 @@
     "agent",
     "cli",
     "control-plane",
-    "opencode"
+    "opencode",
+    "claude-code"
   ],
   "license": "MIT",
   "homepage": "https://github.com/rivetplane/cli#readme",
