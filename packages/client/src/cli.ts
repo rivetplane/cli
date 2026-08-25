@@ -11,7 +11,7 @@ const { version } = require("../package.json") as { version: string };
 const HELP = `Rivetplane local client
 
 Usage:
-  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-index-interval SECONDS] [--opencode-max-sessions-per-project COUNT] [--no-opencode] [--no-opencode-export] [--no-relay]
+  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-index-interval SECONDS] [--opencode-export-timeout SECONDS] [--opencode-export-concurrency COUNT] [--opencode-max-sessions-per-project COUNT] [--no-opencode] [--no-opencode-export] [--no-relay]
   rivetplane --opencode-url URL [client options]
   rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
@@ -53,6 +53,10 @@ async function main(): Promise<void> {
   if (!Number.isSafeInteger(maxOpenCodeSessions) || maxOpenCodeSessions <= 0) throw new Error("--opencode-max-sessions-per-project must be a positive integer");
   const openCodeIndexIntervalSeconds = Number(flag("--opencode-index-interval") ?? process.env.HARNESS_CP_OPENCODE_INDEX_INTERVAL_SECONDS ?? 60);
   if (!Number.isSafeInteger(openCodeIndexIntervalSeconds) || openCodeIndexIntervalSeconds <= 0) throw new Error("--opencode-index-interval must be a positive integer number of seconds");
+  const openCodeExportTimeoutSeconds = Number(flag("--opencode-export-timeout") ?? process.env.HARNESS_CP_OPENCODE_EXPORT_TIMEOUT_SECONDS ?? 30);
+  if (!Number.isSafeInteger(openCodeExportTimeoutSeconds) || openCodeExportTimeoutSeconds <= 0) throw new Error("--opencode-export-timeout must be a positive integer number of seconds");
+  const openCodeExportConcurrency = Number(flag("--opencode-export-concurrency") ?? process.env.HARNESS_CP_OPENCODE_EXPORT_CONCURRENCY ?? 2);
+  if (!Number.isSafeInteger(openCodeExportConcurrency) || openCodeExportConcurrency <= 0) throw new Error("--opencode-export-concurrency must be a positive integer");
   const client = new HarnessControlClient({
     ...(credentials ? { credentials } : {}),
     ...(discoveryDirectory ? { discovery_directory: discoveryDirectory } : {}),
@@ -66,6 +70,8 @@ async function main(): Promise<void> {
     opencode_checkpoint_path: flag("--opencode-checkpoint") ?? process.env.HARNESS_CP_OPENCODE_CHECKPOINT,
     opencode_max_sessions_per_project: maxOpenCodeSessions,
     opencode_index_interval_ms: openCodeIndexIntervalSeconds * 1_000,
+    opencode_export_timeout_ms: openCodeExportTimeoutSeconds * 1_000,
+    opencode_export_concurrency: openCodeExportConcurrency,
   });
   client.manager.registry.on("log", (message) => process.stderr.write(`${String(message)}\n`));
   const started = await client.start();

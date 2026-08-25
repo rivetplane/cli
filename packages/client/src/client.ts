@@ -21,6 +21,8 @@ export interface ClientOptions {
   opencode_checkpoint_path?: string;
   opencode_max_sessions_per_project?: number;
   opencode_index_interval_ms?: number;
+  opencode_export_timeout_ms?: number;
+  opencode_export_concurrency?: number;
 }
 
 export class HarnessControlClient {
@@ -40,6 +42,8 @@ export class HarnessControlClient {
       ...(options.opencode_checkpoint_path ? { checkpoint_path: options.opencode_checkpoint_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
       ...(options.opencode_max_sessions_per_project ? { max_sessions_per_project: options.opencode_max_sessions_per_project } : {}),
       ...(options.opencode_index_interval_ms ? { index_interval_ms: options.opencode_index_interval_ms } : {}),
+      ...(options.opencode_export_timeout_ms ? { export_timeout_ms: options.opencode_export_timeout_ms } : {}),
+      ...(options.opencode_export_concurrency ? { export_concurrency: options.opencode_export_concurrency } : {}),
     });
     const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.opencode_exports?.target(id);
     this.local_api = new LocalApi(this.manager.registry, { port: options.local_port ?? 41737, target,
