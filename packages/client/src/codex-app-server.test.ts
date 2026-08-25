@@ -19,7 +19,10 @@ test("uses app-server request IDs exactly and supports messages, questions, appr
       const id = message.id; const method = message.method;
       if (method === "initialize") socket.send(JSON.stringify({ id, result: { userAgent: "codex-cli/0.148.0", platformFamily: "unix", platformOs: "macos" } }));
       else if (method === "model/list") socket.send(JSON.stringify({ id, result: { data: [{ id: "gpt-test", model: "gpt-test", displayName: "GPT Test" }], nextCursor: null } }));
-      else if (method === "thread/list") socket.send(JSON.stringify({ id, result: { data: [{ id: "thread-1", sessionId: "thread-1", parentThreadId: null, cwd: "/repo", createdAt: 1, updatedAt: 2, status: { type: "idle" }, preview: "Test", name: null, modelProvider: "openai", cliVersion: "0.148.0", source: "appServer" }], nextCursor: null } }));
+      else if (method === "thread/list") socket.send(JSON.stringify({ id, result: { data: [
+        { id: "thread-1", sessionId: "thread-1", parentThreadId: null, cwd: "/repo", createdAt: 1, updatedAt: 2, status: { type: "idle" }, preview: "Test", name: null, modelProvider: "openai", cliVersion: "0.148.0", source: "appServer" },
+        { id: "thread-old", sessionId: "thread-old", parentThreadId: null, cwd: "/old", createdAt: 1, updatedAt: 1, status: { type: "idle" }, preview: "Old", name: null, modelProvider: "openai", cliVersion: "0.148.0", source: "appServer" },
+      ], nextCursor: null } }));
       else if (method === "thread/read") socket.send(JSON.stringify({ id, result: { thread: { turns: [{ id: "old-turn", status: "completed", completedAt: 3, items: [{ type: "userMessage", id: "old-user", content: [{ type: "text", text: "old", text_elements: [] }] }, { type: "agentMessage", id: "old-agent", text: "answer" }] }] } } }));
       else if (method === "thread/resume") socket.send(JSON.stringify({ id, result: { thread: { id: "thread-1" } } }));
       else if (method === "turn/start") { socket.send(JSON.stringify({ id, result: { turn: { id: "turn-1", status: "inProgress", items: [] } } })); socket.send(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-live", delta: "stream" } })); }
@@ -28,9 +31,9 @@ test("uses app-server request IDs exactly and supports messages, questions, appr
     });
   });
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve)); const port = (http.address() as AddressInfo).port;
-  const registry = new SessionRegistry(); const manager = new CodexAppServerManager("machine-1", registry, { endpoint: `ws://127.0.0.1:${port}`, directory: "/repo", interval_ms: 60_000 });
+  const registry = new SessionRegistry(); const manager = new CodexAppServerManager("machine-1", registry, { endpoint: `ws://127.0.0.1:${port}`, directory: "/repo", interval_ms: 60_000, max_threads: 1 });
   try {
-    await manager.start(); assert.equal(registry.get("thread-1")?.read_only, false); assert.equal(manager.health().live_attachment.supported, true);
+    await manager.start(); assert.equal(registry.get("thread-1")?.read_only, false); assert.equal(registry.get("thread-old"), undefined); assert.equal(manager.harnesses()[0]?.attached_sessions, 1); assert.equal(manager.health().live_attachment.supported, true);
     assert.deepEqual(registry.transcript("thread-1").map((event) => event.type), ["user_message", "agent_message"]);
     await manager.target("thread-1")!.sendMessage("continue"); await eventually(() => registry.transcript("thread-1").some((event) => event.type === "agent_message" && event.payload.text === "stream"), "streamed delta");
     await manager.target("thread-1")!.interrupt(); assert.equal(received.some((message) => message.method === "turn/interrupt" && (message.params as Message).turnId === "turn-1"), true);
@@ -49,6 +52,6 @@ test("uses app-server request IDs exactly and supports messages, questions, appr
 
     peer!.send(JSON.stringify({ method: "item/commandExecution/requestApproval", id: 99, params: { threadId: "thread-1", turnId: "turn-4", itemId: "cmd-stale", command: "echo stale" } }));
     await eventually(() => registry.get("thread-1")?.pending?.id === "99", "pending request before disconnect"); peer!.close();
-    await eventually(() => registry.get("thread-1")?.pending === null && manager.health().live_attachment.supported === false, "stale request cleanup after disconnect");
+    await eventually(() => registry.get("thread-1") === undefined && manager.health().live_attachment.supported === false, "stale session cleanup after disconnect");
   } finally { await manager.stop(); await new Promise<void>((resolve) => server.close(() => http.close(() => resolve()))); }
 });

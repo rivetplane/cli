@@ -24,6 +24,10 @@ export interface CodexRolloutDiscoveryOptions {
   max_initial_bytes?: number;
   max_incremental_bytes?: number;
   max_event_text_bytes?: number;
+  concurrency?: number;
+  scan_interval_ms?: number;
+  retry_base_ms?: number;
+  max_retry_ms?: number;
   now?: () => number;
 }
 
@@ -42,6 +46,12 @@ function boundedText(value: unknown, maxBytes: number): string {
 }
 function contentText(content: unknown[], maxBytes: number): string {
   return boundedText(content.flatMap((part) => { const item = object(part); const value = string(item?.text); return value && (item?.type === "input_text" || item?.type === "output_text" || item?.type === "text") ? [value] : []; }).join(""), maxBytes);
+}
+async function mapLimit<T>(values: readonly T[], concurrency: number, operation: (value: T) => Promise<void>): Promise<void> {
+  let index = 0;
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, async () => {
+    while (index < values.length) { const value = values[index++]; if (value !== undefined) await operation(value); }
+  }));
 }
 
 export function parseCodexRolloutLine(line: string, fallbackSessionId: string, maxTextBytes = 64 * 1024): { meta?: RolloutMeta; event?: ParsedEvent } {
@@ -77,19 +87,19 @@ class ReadOnlyCodexTarget implements CommandTarget {
   async interrupt(): Promise<void> { throw new Error("This Codex session is not attached to a supported app-server transport"); }
 }
 
-async function rolloutFiles(root: string, limit: number): Promise<string[]> {
+async function rolloutFiles(root: string, limit: number): Promise<Array<{ path: string; mtime: number }>> {
   const files: Array<{ path: string; mtime: number }> = [];
   async function walk(directory: string): Promise<void> {
     if (files.length >= limit) return;
     let entries; try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
-    for (const entry of entries) {
+    for (const entry of entries.sort((left, right) => right.name.localeCompare(left.name))) {
       if (files.length >= limit) break;
       const path = join(directory, entry.name);
       if (entry.isDirectory()) await walk(path);
       else if (entry.isFile() && entry.name.endsWith(".jsonl")) { const value = await stat(path).catch(() => undefined); if (value) files.push({ path, mtime: value.mtimeMs }); }
     }
   }
-  await walk(root); return files.sort((a, b) => b.mtime - a.mtime).map((item) => item.path);
+  await walk(root); return files.sort((a, b) => b.mtime - a.mtime);
 }
 
 export class CodexRolloutDiscovery {
@@ -101,6 +111,9 @@ export class CodexRolloutDiscovery {
   #checkpoints: CheckpointFile = { version: 1, sessions: {} };
   #present = new Set<string>();
   #available = false;
+  #files: string[] = [];
+  #nextScanAt = 0;
+  #fileFailures = new Map<string, { attempts: number; next_attempt_at: number }>();
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: CodexRolloutDiscoveryOptions = {}) {
     this.sessions_directory = options.sessions_directory ?? join(homedir(), ".codex", "sessions");
@@ -122,9 +135,25 @@ export class CodexRolloutDiscovery {
     try {
       await this.#load();
       await access(this.sessions_directory, constants.R_OK); this.#available = true;
-      const files = (await rolloutFiles(this.sessions_directory, this.options.max_scan_files ?? 10_000)).slice(0, this.options.max_sessions ?? 250);
+      const now = this.options.now?.() ?? Date.now();
+      if (now >= this.#nextScanAt) {
+        const cutoff = now - (this.options.recent_window_ms ?? 24 * 60 * 60_000); const limit = Math.max(1, this.options.max_sessions ?? 48);
+        const candidates = await rolloutFiles(this.sessions_directory, this.options.max_scan_files ?? 10_000);
+        this.#files = candidates.filter((file) => file.mtime >= cutoff).slice(0, limit).map((file) => file.path);
+        this.#nextScanAt = now + (this.options.scan_interval_ms ?? 30_000);
+      }
       const seen = new Set<string>();
-      for (const path of files) { const id = await this.#read(path); if (id) seen.add(id); }
+      await mapLimit(this.#files, this.options.concurrency ?? 2, async (path) => {
+        const retry = this.#fileFailures.get(path); const current = this.options.now?.() ?? Date.now();
+        if (retry && current < retry.next_attempt_at) { const id = this.#checkpointForPath(path)?.meta?.id; if (id) seen.add(id); return; }
+        try { const id = await this.#read(path); if (id) seen.add(id); this.#fileFailures.delete(path); }
+        catch (error) {
+          const attempts = (retry?.attempts ?? 0) + 1; const delay = this.#retryDelay(attempts); const id = this.#checkpointForPath(path)?.meta?.id;
+          if (id) seen.add(id); this.#fileFailures.set(path, { attempts, next_attempt_at: current + delay });
+          this.registry.emit("warning", new Error(`Codex rollout ${basename(path)} failed; retrying in ${Math.ceil(delay / 1_000)}s: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      });
+      for (const id of this.#present) if (!seen.has(id) && this.registry.get(id)?.read_only !== false) this.registry.remove(id);
       this.#present = seen; await this.#save();
     } catch (error) { this.#available = false; this.registry.emit("warning", new Error(`Codex rollout discovery failed: ${error instanceof Error ? error.message : String(error)}`)); }
     finally { this.#polling = false; }
@@ -132,7 +161,7 @@ export class CodexRolloutDiscovery {
 
   async #read(path: string): Promise<string | undefined> {
     const info = await stat(path); const fallback = basename(path, ".jsonl").split("-").at(-1) ?? basename(path, ".jsonl");
-    let checkpoint = Object.values(this.#checkpoints.sessions).find((item) => item.path === path);
+    let checkpoint = this.#checkpointForPath(path);
     if (checkpoint && !this.registry.get(checkpoint.meta?.id ?? fallback)) checkpoint = undefined;
     const rotated = checkpoint && ((checkpoint.inode !== undefined && Number(info.ino) !== checkpoint.inode) || info.size < checkpoint.offset);
     if (rotated) checkpoint = undefined;
@@ -180,4 +209,6 @@ export class CodexRolloutDiscovery {
     this.#checkpoints.sessions = Object.fromEntries(entries); await mkdir(dirname(this.checkpoint_path), { recursive: true, mode: 0o700 });
     const temporary = `${this.checkpoint_path}.${process.pid}.tmp`; await writeFile(temporary, `${JSON.stringify(this.#checkpoints)}\n`, { mode: 0o600 }); await rename(temporary, this.checkpoint_path);
   }
+  #checkpointForPath(path: string): Checkpoint | undefined { return Object.values(this.#checkpoints.sessions).find((item) => item.path === path); }
+  #retryDelay(attempts: number): number { return Math.min(this.options.max_retry_ms ?? 5 * 60_000, (this.options.retry_base_ms ?? 30_000) * 2 ** Math.max(0, attempts - 1)); }
 }

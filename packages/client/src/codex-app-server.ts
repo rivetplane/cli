@@ -16,7 +16,7 @@ type RpcId = number | string;
 type RecordValue = Record<string, unknown>;
 interface PendingRpc { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; method: string }
 interface PendingServerRequest { rpc_id: RpcId; method: string; params: RecordValue }
-interface ThreadState { turn_id?: string; loaded: boolean }
+interface ThreadState { turn_id?: string; loaded: boolean; history_loaded?: boolean; history_attempts?: number; history_retry_at?: number; missing_polls?: number; retain_until?: number }
 
 export interface CodexAppServerOptions {
   endpoint?: string;
@@ -28,6 +28,13 @@ export interface CodexAppServerOptions {
   interval_ms?: number;
   request_timeout_ms?: number;
   max_threads?: number;
+  missing_poll_limit?: number;
+  new_thread_grace_ms?: number;
+  history_threads?: number;
+  concurrency?: number;
+  retry_base_ms?: number;
+  max_retry_ms?: number;
+  now?: () => number;
   spawn_process?: typeof spawn;
   platform?: NodeJS.Platform;
 }
@@ -44,6 +51,12 @@ function threadStatus(value: unknown): SessionStatus {
 }
 function questionOptions(value: unknown): Array<{ label: string; description?: string }> {
   return array(value).flatMap((entry) => { const option = object(entry); const label = string(option?.label); const description = string(option?.description); return label ? [{ label, ...(description ? { description } : {}) }] : []; });
+}
+async function mapLimit<T>(values: readonly T[], concurrency: number, operation: (value: T) => Promise<void>): Promise<void> {
+  let index = 0;
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, async () => {
+    while (index < values.length) { const value = values[index++]; if (value !== undefined) await operation(value); }
+  }));
 }
 
 async function availablePort(): Promise<number> {
@@ -88,13 +101,16 @@ export class CodexAppServerManager {
   #operations = { persisted_discovery: true, live_attachment: false, messaging: false, interrupt: false, question_response: false, approval_response: false };
   #models: HarnessCapabilities["models"] = [];
   #default_model: string | undefined;
+  #pollFailures = 0;
+  #nextPollAt = 0;
+  #stopped = false;
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: CodexAppServerOptions = {}) {
     this.directory = options.directory ?? process.cwd(); this.#endpoint = options.endpoint; this.#token = options.token;
   }
-  async start(): Promise<void> { if (this.options.managed) await this.#launch(); await this.poll(); this.#timer = setInterval(() => void this.poll(), this.options.interval_ms ?? 2_000); this.#timer.unref(); }
+  async start(): Promise<void> { this.#stopped = false; if (this.options.managed) await this.#launch(); await this.poll(); this.#timer = setInterval(() => void this.poll(), this.options.interval_ms ?? 2_000); this.#timer.unref(); }
   async stop(): Promise<void> {
-    if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; this.#close(new Error("Codex app-server stopped"));
+    this.#stopped = true; if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; this.#close(new Error("Codex app-server stopped"));
     if (this.#child) { const child = this.#child; this.#child = undefined; child.kill("SIGTERM"); }
     if (this.options.managed && this.#transport === "unix" && this.#endpoint) await unlink(this.#endpoint.replace(/^unix:\/\//, "")).catch(() => undefined);
     if (this.options.managed && this.#token_path) await unlink(this.#token_path).catch(() => undefined);
@@ -115,16 +131,21 @@ export class CodexAppServerManager {
     if (!this.#online) throw new Error("Codex app-server is not connected");
     const result = object(await this.#request("thread/start", { cwd: command.cwd, model: command.model.model_id, approvalPolicy: "untrusted", sandbox: "workspace-write", serviceName: "rivetplane" }));
     const thread = object(result?.thread); const id = string(thread?.id); if (!thread || !id) throw new Error("Codex thread/start returned no thread ID");
-    this.#syncThread(thread); this.#threads.get(id)!.loaded = true; return id;
+    this.#syncThread(thread); const state = this.#threads.get(id)!; state.loaded = true; state.retain_until = (this.options.now?.() ?? Date.now()) + (this.options.new_thread_grace_ms ?? 60_000); return id;
   }
 
   async poll(): Promise<void> {
-    if (this.#polling) return; this.#polling = true;
+    const now = this.options.now?.() ?? Date.now();
+    if (this.#polling || now < this.#nextPollAt) return; this.#polling = true;
     try {
       if (this.options.managed && (!this.#child || this.#child.exitCode !== null)) await this.#launch();
       if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) await this.#connect();
       await this.#listThreads();
-    } catch (error) { this.#online = false; this.#operations.live_attachment = false; this.registry.emit("warning", new Error(`Codex app-server: ${error instanceof Error ? error.message : String(error)}`)); }
+      this.#pollFailures = 0; this.#nextPollAt = 0;
+    } catch (error) {
+      this.#online = false; this.#operations.live_attachment = false;
+      if (!this.#stopped) { const delay = this.#retryDelay(++this.#pollFailures); this.#nextPollAt = now + delay; this.registry.emit("warning", new Error(`Codex app-server failed; retrying in ${Math.ceil(delay / 1_000)}s: ${error instanceof Error ? error.message : String(error)}`)); }
+    }
     finally { this.#polling = false; }
   }
 
@@ -210,21 +231,36 @@ export class CodexAppServerManager {
 
   async #listThreads(): Promise<void> {
     if (!this.#endpoint) return;
-    let cursor: string | null = null; let count = 0; const found = new Set<string>();
+    const maxThreads = Math.max(1, this.options.max_threads ?? 48); let cursor: string | null = null; let count = 0; const found = new Set<string>();
     do {
-      const response = object(await this.#request("thread/list", { limit: Math.min(100, (this.options.max_threads ?? 250) - count), cursor, sortKey: "updated_at", sortDirection: "desc" }));
+      const response = object(await this.#request("thread/list", { limit: Math.min(100, maxThreads - count), cursor, sortKey: "updated_at", sortDirection: "desc" }));
       const threads = array(response?.data).map(object).filter((item): item is RecordValue => Boolean(item));
       for (const thread of threads) {
-        if (count++ >= (this.options.max_threads ?? 250)) break; const id = string(thread.id); if (!id || thread.parentThreadId) continue;
-        const first = !this.#threads.has(id); found.add(id); this.#syncThread(thread);
-        if (first && found.size <= 24) await this.#readThread(id).catch(() => undefined);
+        const id = string(thread.id); if (!id || thread.parentThreadId) continue; if (count++ >= maxThreads) break;
+        found.add(id); this.#syncThread(thread);
       }
       cursor = string(response?.nextCursor) ?? null;
-    } while (cursor && count < (this.options.max_threads ?? 250));
-    for (const id of [...this.#threads.keys()]) if (!found.has(id)) this.#threads.delete(id);
+    } while (cursor && count < maxThreads);
+    for (const [id, state] of this.#threads) if (!found.has(id)) {
+      const current = this.registry.get(id); const now = this.options.now?.() ?? Date.now();
+      if (now < (state.retain_until ?? 0) || current?.status === "running" || current?.pending) continue;
+      state.missing_polls = (state.missing_polls ?? 0) + 1; if (state.missing_polls < (this.options.missing_poll_limit ?? 3)) continue;
+      this.#threads.delete(id); if (object(current?.metadata)?.codex_control === "app-server") this.registry.remove(id);
+    }
+    const now = this.options.now?.() ?? Date.now(); const history = [...found].slice(0, Math.max(0, this.options.history_threads ?? 12)).filter((id) => {
+      const state = this.#threads.get(id); return state && !state.history_loaded && now >= (state.history_retry_at ?? 0);
+    });
+    await mapLimit(history, this.options.concurrency ?? 2, async (id) => {
+      const state = this.#threads.get(id); if (!state) return;
+      try { await this.#readThread(id); state.history_loaded = true; state.history_attempts = 0; state.history_retry_at = 0; }
+      catch (error) {
+        state.history_attempts = (state.history_attempts ?? 0) + 1; const delay = this.#retryDelay(state.history_attempts); state.history_retry_at = now + delay;
+        this.registry.emit("warning", new Error(`Codex thread ${id} history failed; retrying in ${Math.ceil(delay / 1_000)}s: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    });
   }
   #syncThread(thread: RecordValue): void {
-    const id = string(thread.id)!; const current = this.registry.get(id); const state = this.#threads.get(id) ?? { loaded: false }; this.#threads.set(id, state);
+    const id = string(thread.id)!; const current = this.registry.get(id); const state = this.#threads.get(id) ?? { loaded: false }; state.missing_polls = 0; this.#threads.set(id, state);
     const status = current?.pending?.type === "approval" ? "waiting_approval" : current?.pending?.type === "question" ? "waiting_input" : threadStatus(thread.status);
     this.registry.upsert({ id, machine_id: this.machine_id, harness_type: "codex", cwd: string(thread.cwd) ?? this.directory, status, created_at: isoSeconds(thread.createdAt), last_activity_at: isoSeconds(thread.updatedAt), pending: current?.pending ?? null,
       title: string(thread.name) ?? string(thread.preview), read_only: false, ...(string(thread.modelProvider) ? { model: { provider_id: string(thread.modelProvider)!, model_id: "unknown" } } : {}),
@@ -294,8 +330,9 @@ export class CodexAppServerManager {
     });
   }
   #send(message: unknown): void { if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) throw new Error("Codex app-server is not connected"); this.#socket.send(JSON.stringify(message)); }
-  #close(error: Error): void { const socket = this.#socket; this.#socket = undefined; this.#online = false; this.#operations.live_attachment = false; if (socket && socket.readyState === WebSocket.OPEN) socket.close(); for (const request of this.#requests.values()) { clearTimeout(request.timer); request.reject(error); } this.#requests.clear(); for (const pending of this.#pending.values()) { const threadId = string(pending.params.threadId); if (threadId && this.registry.get(threadId)) this.registry.setPending(threadId, null); } this.#pending.clear(); }
+  #close(error: Error): void { const socket = this.#socket; this.#socket = undefined; this.#online = false; this.#operations.live_attachment = false; if (socket && socket.readyState === WebSocket.OPEN) socket.close(); for (const request of this.#requests.values()) { clearTimeout(request.timer); request.reject(error); } this.#requests.clear(); this.#pending.clear(); for (const id of this.#threads.keys()) { const current = this.registry.get(id); if (object(current?.metadata)?.codex_control === "app-server") this.registry.remove(id); } this.#threads.clear(); }
   #requireThread(id: string): ThreadState { const state = this.#threads.get(id); if (!state) throw new Error(`Codex thread ${id} is not attached`); return state; }
   #disableMethod(method: string): void { if (method === "turn/start") this.#operations.messaging = false; else if (method === "turn/interrupt") this.#operations.interrupt = false; }
+  #retryDelay(attempts: number): number { return Math.min(this.options.max_retry_ms ?? 5 * 60_000, (this.options.retry_base_ms ?? 30_000) * 2 ** Math.max(0, attempts - 1)); }
   #diagnostic(method: string): void { if (this.#unknown.has(method) || this.#unknown.size >= 100) return; this.#unknown.add(method); this.registry.emit("log", `Codex app-server ignored unknown protocol event: ${method}`); }
 }

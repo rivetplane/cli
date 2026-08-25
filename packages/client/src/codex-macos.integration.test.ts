@@ -11,7 +11,11 @@ const run = promisify(execFile);
 async function eventually<T>(read: () => Promise<T> | T, accept: (value: T) => boolean, label: string, timeout = 90_000): Promise<T> {
   const end = Date.now() + timeout; let value = await read(); while (!accept(value) && Date.now() < end) { await new Promise((resolve) => setTimeout(resolve, 250)); value = await read(); } if (!accept(value)) throw new Error(`Timed out: ${label}; last value: ${JSON.stringify(value).slice(0, 2_000)}`); return value;
 }
-async function json<T>(url: string): Promise<T> { return await (await fetch(url)).json() as T; }
+async function json<T>(url: string): Promise<T> {
+  const response = await fetch(url); const value = await response.json() as T;
+  if (!response.ok) throw new Error(`${response.status} ${url}: ${JSON.stringify(value)}`);
+  return value;
+}
 
 test("macOS managed Codex app-server end to end", { skip: process.platform !== "darwin" || process.env.RIVETPLANE_CODEX_INTEGRATION !== "1", timeout: 240_000 }, async () => {
   const repo = await mkdtemp(join(tmpdir(), "rivetplane-codex-e2e-")); await run("git", ["init", "-q", repo]);

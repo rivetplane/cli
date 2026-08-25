@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -45,5 +45,20 @@ test("skips an over-limit JSONL line and continues at the next complete event", 
     await discovery.poll(); await writeFile(path, `${original}${"x".repeat(300)}\n{"timestamp":"2026-08-25T10:00:09.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after long line"}]}}\n`);
     for (let index = 0; index < 4; index += 1) await discovery.poll();
     assert.equal(registry.transcript("019c-test-thread").filter((event) => event.type === "agent_message").at(-1)?.payload.text, "after long line");
+  } finally { discovery.stop(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("relays only a bounded recent rollout roster and removes stale live entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-bounded-")); const sessions = join(root, "sessions"); await mkdir(sessions, { recursive: true });
+  const original = await readFile(fixture, "utf8"); let now = Date.now();
+  for (let index = 0; index < 4; index += 1) {
+    const id = `thread-${index}`; const content = original.replaceAll("019c-test-thread", id); const path = join(sessions, `rollout-${index}.jsonl`);
+    await writeFile(path, content); const time = new Date(now - index * 1_000); await utimes(path, time, time);
+  }
+  const registry = new SessionRegistry(); const discovery = new CodexRolloutDiscovery("machine-1", registry, { sessions_directory: sessions, checkpoint_path: join(root, "checkpoint.json"), max_sessions: 2, scan_interval_ms: 1, now: () => now });
+  try {
+    await discovery.poll(); assert.deepEqual(registry.list().map((session) => session.id).sort(), ["thread-0", "thread-1"]);
+    const path = join(sessions, "rollout-0.jsonl"); await rm(path); now += 2; await discovery.poll();
+    assert.equal(registry.get("thread-0"), undefined); assert.equal(registry.list().length, 2);
   } finally { discovery.stop(); await rm(root, { recursive: true, force: true }); }
 });

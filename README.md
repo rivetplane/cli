@@ -39,9 +39,9 @@ Managed and direct HTTP sessions support messages, interrupts, approvals, and qu
 
 ## Codex sessions
 
-Rivetplane reads Codex rollout JSONL files from `~/.codex/sessions` by default. This discovery does not depend on the current directory. It reports persisted and recently active sessions as read-only. It does not claim that a rollout is attached to a live process. Rivetplane cannot attach to an independently launched `codex app-server` process that uses stdio because that process owns its pipes.
+Rivetplane reads recent Codex rollout JSONL files from `~/.codex/sessions` by default. This discovery does not depend on the current directory. It relays at most 48 rollout sessions updated in the last 24 hours, scans the file roster every 30 seconds, and reports the sessions as read-only. It does not claim that a rollout is attached to a live process. Rivetplane cannot attach to an independently launched `codex app-server` process that uses stdio because that process owns its pipes.
 
-Run `npx rivetplane codex` to start a Rivetplane-managed Codex app-server. This mode supports session creation and recovery, streamed transcripts, messages, interrupts, command and file approvals, and supported user-input questions. It uses a permission-protected Unix socket on macOS and Linux. It uses an authenticated loopback WebSocket on Windows. Rivetplane stops only the app-server process that it starts.
+Run `npx rivetplane codex` to start a Rivetplane-managed Codex app-server. This mode supports session creation and recovery, streamed transcripts, messages, interrupts, command and file approvals, and supported user-input questions. It relays the 48 most recently updated threads and loads transcript history for at most 12 threads with two concurrent requests. It always keeps running, pending, and newly created threads during roster convergence. It uses a permission-protected Unix socket on macOS and Linux. It uses an authenticated loopback WebSocket on Windows. Rivetplane stops only the app-server process that it starts.
 
 Use `--codex-endpoint URL` to connect to a supported shared listener. Put its bearer token in `HARNESS_CP_CODEX_TOKEN`; do not put the token on the command line. Use `--codex-sessions-dir`, `--codex-checkpoint`, `--codex-directory`, or `--codex-executable` to change the local defaults. Use `--no-codex` to disable rollout discovery.
 
