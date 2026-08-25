@@ -1,0 +1,8 @@
+{"timestamp":"2026-08-25T10:00:00.000Z","type":"session_meta","payload":{"id":"019c-test-thread","timestamp":"2026-08-25T10:00:00.000Z","cwd":"/tmp/disposable-repo","cli_version":"0.148.0","model_provider":"openai"}}
+{"timestamp":"2026-08-25T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+{"timestamp":"2026-08-25T10:00:02.000Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}
+{"timestamp":"2026-08-25T10:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}
+{"timestamp":"2026-08-25T10:00:04.000Z","type":"event_msg","payload":{"type":"agent_message","message":"hi"}}
+{"timestamp":"2026-08-25T10:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}","call_id":"call-1"}}
+{"timestamp":"2026-08-25T10:00:06.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"/tmp/disposable-repo"}}
+{"timestamp":"2026-08-25T10:00:07.000Z","type":"future_schema","payload":{"new":"value"}}

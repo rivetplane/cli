@@ -11,16 +11,20 @@ const { version } = require("../package.json") as { version: string };
 const HELP = `Rivetplane local client
 
 Usage:
-  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-index-interval SECONDS] [--opencode-export-timeout SECONDS] [--opencode-export-concurrency COUNT] [--opencode-max-sessions-per-project COUNT] [--claude-executable PATH] [--claude-config-dir PATH] [--claude-checkpoint PATH] [--no-claude-code] [--no-opencode] [--no-opencode-export] [--no-relay]
+  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-index-interval SECONDS] [--opencode-export-timeout SECONDS] [--opencode-export-concurrency COUNT] [--opencode-max-sessions-per-project COUNT] [--claude-executable PATH] [--claude-config-dir PATH] [--claude-checkpoint PATH] [--codex-endpoint URL] [--codex-directory PATH] [--codex-executable PATH] [--codex-sessions-dir PATH] [--codex-checkpoint PATH] [--no-claude-code] [--no-codex] [--no-opencode] [--no-opencode-export] [--no-relay]
   rivetplane --opencode-url URL [client options]
   rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
+  rivetplane codex [client options]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
   rivetplane --help
 
 The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, and reads existing
 OpenCode sessions with 'opencode session list' and 'opencode export'. Export discovery
 is read-only. It can show pending questions, but it cannot answer them in the original
-process. The machine index refreshes every 60 seconds by default. The 2-second
+process. Codex rollout discovery is also read-only and does not claim attachment to
+independently launched stdio app-server processes. Use 'rivetplane codex' to start a
+Rivetplane-managed Codex app-server. Unix sockets are used on macOS/Linux. An
+authenticated loopback WebSocket is used on Windows. The machine index refreshes every 60 seconds by default. The 2-second
 transcript poll uses the cached index. Claude Code sessions are discovered machine-wide
 with 'claude agents --json'. Their JSONL transcripts and exact-ID pending records are
 read-only because Claude has no documented local exact-ID reply API. Private cc-socks
@@ -47,6 +51,7 @@ async function main(): Promise<void> {
   }
 
   const explicitOpenCode = process.argv[2] === "opencode";
+  const explicitCodex = process.argv[2] === "codex";
   const attachOpenCode = explicitOpenCode;
   const credentials = await readCredentials();
   const discoveryDirectory = flag("--discovery-dir");
@@ -75,6 +80,14 @@ async function main(): Promise<void> {
     opencode_index_interval_ms: openCodeIndexIntervalSeconds * 1_000,
     opencode_export_timeout_ms: openCodeExportTimeoutSeconds * 1_000,
     opencode_export_concurrency: openCodeExportConcurrency,
+    codex: !process.argv.includes("--no-codex"),
+    codex_managed: explicitCodex,
+    codex_endpoint: explicitCodex ? undefined : (flag("--codex-endpoint") ?? process.env.HARNESS_CP_CODEX_ENDPOINT),
+    codex_token: process.env.HARNESS_CP_CODEX_TOKEN,
+    codex_directory: flag("--codex-directory") ?? process.env.HARNESS_CP_CODEX_DIRECTORY ?? process.cwd(),
+    codex_executable: flag("--codex-executable") ?? process.env.HARNESS_CP_CODEX_EXECUTABLE,
+    codex_sessions_directory: flag("--codex-sessions-dir") ?? process.env.HARNESS_CP_CODEX_SESSIONS_DIRECTORY,
+    codex_checkpoint_path: flag("--codex-checkpoint") ?? process.env.HARNESS_CP_CODEX_CHECKPOINT,
     claude_code: !process.argv.includes("--no-claude-code"),
     claude_executable: flag("--claude-executable") ?? process.env.HARNESS_CP_CLAUDE_EXECUTABLE,
     claude_config_dir: flag("--claude-config-dir") ?? process.env.CLAUDE_CONFIG_DIR,
@@ -85,7 +98,7 @@ async function main(): Promise<void> {
   process.stdout.write(`Local API: http://127.0.0.1:${started.local_port}/v1\n`);
   process.stdout.write(credentials && !process.argv.includes("--no-relay") ? `Relay: ${credentials.server_url}\n` : "Relay: disabled (run rivetplane login to pair this machine)\n");
   const harnesses = client.harnesses();
-  if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode export: ${client.opencode_exports?.executable ?? "not found"}; managed OpenCode: ${client.opencode ? client.opencode.url : "disabled"})\n`);
+  if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode export: ${client.opencode_exports?.executable ?? "not found"}; managed OpenCode: ${client.opencode ? client.opencode.url : "disabled"}; Claude Code: ${client.claude_code?.executable ?? "not found"}; Codex rollouts: ${client.codex_rollouts?.sessions_directory ?? "disabled"}; Codex app-server: ${client.codex_app_server ? "configured" : "disabled"})\n`);
   else for (const harness of harnesses) process.stdout.write(`Harness: ${harness.harness_type} (${harness.attached_sessions}/${harness.discovered_sessions} sessions attached)\n`);
   let stopping = false;
   let attachedProcess: ChildProcess | undefined;

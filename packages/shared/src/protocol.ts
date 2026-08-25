@@ -16,6 +16,12 @@ export interface HarnessModel {
   output_limit?: number;
 }
 
+export interface CapabilitySupport {
+  supported: boolean;
+  mode: "read_only" | "read_write" | "unsupported";
+  reason?: string;
+}
+
 export interface HarnessCapabilities {
   machine_id: string;
   harness_type: string;
@@ -24,21 +30,20 @@ export interface HarnessCapabilities {
   models: HarnessModel[];
   default_model?: { provider_id: string; model_id: string };
   reported_at: Timestamp;
-  /** Independent existing-session adapter capabilities. Omitted by older clients. */
+  /** Independent existing-session adapter capabilities. Older servers can ignore this additive field. */
   session_capabilities?: {
+    persisted_discovery?: CapabilitySupport;
     discovery: CapabilitySupport;
     transcript: CapabilitySupport;
+    live_attachment?: CapabilitySupport;
     messaging: CapabilitySupport;
+    interrupt?: CapabilitySupport;
     question_response: CapabilitySupport;
     approval_response: CapabilitySupport;
   };
+  transport?: string;
   harness_version?: string;
-}
-
-export interface CapabilitySupport {
-  supported: boolean;
-  mode: "read_only" | "read_write" | "unsupported";
-  reason?: string;
+  limitations?: string[];
 }
 
 export const PROTOCOL_VERSION = 1 as const;

@@ -2,6 +2,7 @@ import type { AcpSessionDescriptor } from "./discovery.js";
 import { SessionDiscovery } from "./discovery.js";
 import { ACPAttach } from "./acp-attach.js";
 import { SessionRegistry } from "./registry.js";
+import type { CapabilitySupport } from "@rivetplane/shared/protocol";
 
 interface Managed { signature: string; attach: ACPAttach }
 export interface HarnessDiscoveryStatus {
@@ -10,11 +11,17 @@ export interface HarnessDiscoveryStatus {
   attached_sessions: number;
   version?: string;
   capabilities?: {
-    discovery: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
-    transcript: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
-    messaging: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
-    question_response: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
-    approval_response: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
+    persisted_discovery?: CapabilitySupport;
+    discovery: CapabilitySupport;
+    transcript: CapabilitySupport;
+    live_attachment?: CapabilitySupport;
+    messaging: CapabilitySupport;
+    interrupt?: CapabilitySupport;
+    question_response: CapabilitySupport;
+    approval_response: CapabilitySupport;
+    transport?: string;
+    managed?: boolean;
+    endpoint?: string | null;
   };
 }
 

@@ -8,6 +8,7 @@
     "cli",
     "control-plane",
     "opencode",
+    "codex",
     "claude-code"
   ],
   "license": "MIT",
