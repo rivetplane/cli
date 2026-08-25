@@ -14,6 +14,12 @@ export interface Credentials {
   token: string;
 }
 
+export const DEFAULT_SERVER_URL = "https://rivetplane.com";
+
+export function resolveServerUrl(option?: string, environment?: string): string {
+  return option ?? environment ?? DEFAULT_SERVER_URL;
+}
+
 export function credentialsPath(): string { return join(homedir(), ".config", "harness-cp", "credentials"); }
 export function deviceIdentityPath(credentials = credentialsPath()): string { return join(dirname(credentials), "device-id"); }
 

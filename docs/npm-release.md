@@ -67,9 +67,9 @@ npm view rivetplane name version dist-tags repository engines license
 ## Public commands
 
 ```sh
-npx rivetplane login --server https://harness-control-plane-dimavedenyapin.fly.dev
+npx rivetplane login
 npx rivetplane
 npx rivetplane --help
 ```
 
-Node.js 22 or later is required. `login` stores credentials and exits. The plain command must stay running while it discovers local harnesses and relays their events.
+Node.js 24 or later is required. `login` uses `https://rivetplane.com`, stores credentials, and exits. The plain command must stay running while it discovers local harnesses and relays their events.

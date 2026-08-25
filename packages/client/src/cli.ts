@@ -2,7 +2,7 @@
 import { hostname } from "node:os";
 import { createRequire } from "node:module";
 import { HarnessControlClient } from "./client.js";
-import { login, readCredentials, writeCredentials } from "./credentials.js";
+import { login, readCredentials, resolveServerUrl, writeCredentials } from "./credentials.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -11,12 +11,13 @@ const HELP = `Rivetplane local client
 
 Usage:
   rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-url URL] [--opencode-directory PATH] [--no-opencode] [--no-relay]
-  rivetplane login --server URL [--machine-name NAME] [--machine ID --token TOKEN]
+  rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
   rivetplane --help
 
 The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, detects an
-OpenCode server at http://localhost:4096, and exposes
-the local API at http://127.0.0.1:PORT/v1.`;
+OpenCode server at http://localhost:4096, and exposes the local API at
+http://127.0.0.1:PORT/v1. Login uses https://rivetplane.com unless --server or
+HARNESS_CP_SERVER selects a self-hosted control plane.`;
 
 function flag(name: string): string | undefined { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }
 
@@ -24,9 +25,8 @@ async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) { process.stdout.write(`${HELP}\n`); return; }
   if (process.argv.includes("--version") || process.argv.includes("-v")) { process.stdout.write(`${version}\n`); return; }
   if (process.argv[2] === "login") {
-    const server_url = flag("--server") ?? process.env.HARNESS_CP_SERVER;
+    const server_url = resolveServerUrl(flag("--server"), process.env.HARNESS_CP_SERVER);
     const machineName = flag("--machine-name");
-    if (!server_url) throw new Error("Use --server URL or set HARNESS_CP_SERVER");
     const token = flag("--token") ?? process.env.HCP_MACHINE_TOKEN;
     if (token) {
       const credentials = { server_url: server_url.replace(/\/$/, ""), machine_id: flag("--machine") ?? `local-${hostname()}`, machine_name: machineName ?? hostname(), device_id: flag("--machine") ?? `local-${hostname()}`, owner_account_id: "self-hosted", token };

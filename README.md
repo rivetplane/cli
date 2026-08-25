@@ -7,11 +7,11 @@ Rivetplane connects local ACP-compatible and OpenCode agent sessions to a remote
 Node.js 24 or later is required.
 
 ```sh
-npx rivetplane login --server https://harness-control-plane-dimavedenyapin.fly.dev
+npx rivetplane login
 npx rivetplane
 ```
 
-The login command opens Rivetplane in your browser and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, the local API, and the outbound relay. Keep it running while you use Rivetplane.
+The login command uses `https://rivetplane.com`, opens Rivetplane in your browser, and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, the local API, and the outbound relay. Keep it running while you use Rivetplane. Use `--server` only for a self-hosted control plane.
 
 Run `npx rivetplane --help` to see all options.
 
