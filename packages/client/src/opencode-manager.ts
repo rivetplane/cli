@@ -1,7 +1,7 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { createOpencodeServer } from "@opencode-ai/sdk/v2/server";
 import { createServer } from "node:net";
-import type { Part, PermissionRequest, QuestionRequest, Session as OpenCodeSession, SessionStatus as OpenCodeSessionStatus } from "@opencode-ai/sdk/v2/client";
+import type { Part, PermissionRequest, PermissionV2Request, QuestionRequest, QuestionV2Request, Session as OpenCodeSession, SessionStatus as OpenCodeSessionStatus } from "@opencode-ai/sdk/v2/client";
 import type { ApprovalScope, SessionStatus } from "@rivetplane/shared/model";
 import type { CreateSessionCommand, HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
@@ -9,6 +9,9 @@ import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
 
 type SdkResult<T> = { data?: T; error?: unknown };
+
+type PendingPermission = (PermissionRequest & { api: "legacy" }) | (PermissionV2Request & { api: "v2" });
+type PendingQuestion = (QuestionRequest & { api: "legacy" }) | (QuestionV2Request & { api: "v2" });
 
 function unwrap<T>(result: SdkResult<T>, operation: string): T {
   if (result.error) throw new Error(`OpenCode ${operation} failed: ${result.error instanceof Error ? result.error.message : JSON.stringify(result.error)}`);
@@ -63,7 +66,8 @@ export class OpenCodeManager {
   #online = false;
   #sessions = new Map<string, OpenCodeSession>();
   #parts = new Map<string, string>();
-  #questions = new Map<string, QuestionRequest>();
+  #permissions = new Map<string, PendingPermission>();
+  #questions = new Map<string, PendingQuestion>();
   #lastError = "";
   #capabilities: HarnessCapabilities | undefined;
   #capabilitiesAt = 0;
@@ -120,8 +124,8 @@ export class OpenCodeManager {
       const [sessions, statuses, permissions, questions] = await Promise.all([
         client.session.list({ directory: this.directory }).then((result) => unwrap(result, "session list")),
         client.session.status({ directory: this.directory }).then((result) => unwrap(result, "session status")),
-        client.permission.list({ directory: this.directory }).then((result) => unwrap(result, "permission list")),
-        client.question.list({ directory: this.directory }).then((result) => unwrap(result, "question list")),
+        this.#listPermissions(client),
+        this.#listQuestions(client),
       ]);
       const active = new Set(sessions.map((session) => session.id));
       for (const id of this.#sessions.keys()) if (!active.has(id)) this.#sessions.delete(id);
@@ -172,13 +176,28 @@ export class OpenCodeManager {
     if (!pending || pending.id !== pendingId) throw new Error(`Pending interaction ${pendingId} is no longer active`);
     if (pending.type === "approval") {
       const reply = response === "deny" ? "reject" : scope === "once" || !scope ? "once" : "always";
-      unwrap(await this.#requireClient().permission.reply({ requestID: pendingId, directory: session.directory, reply }), "permission reply");
+      const request = this.#permissions.get(pendingId);
+      if (!request) throw new Error(`Permission ${pendingId} is no longer active`);
+      if (request.api === "v2") {
+        unwrap(await this.#requireClient().v2.session.permission.reply({ sessionID: id, requestID: pendingId, reply }), "V2 permission reply");
+      } else {
+        unwrap(await this.#requireClient().permission.reply({ requestID: pendingId, directory: session.directory, reply }), "permission reply");
+      }
+      this.#permissions.delete(pendingId);
       this.registry.append(id, "permission_response", { approval_id: pendingId, resolution: response === "deny" ? "deny" : "approve", ...(scope ? { scope } : {}) });
     } else {
       const request = this.#questions.get(pendingId);
       if (!request) throw new Error(`Question ${pendingId} is no longer active`);
       const answers = request.questions.map((_, index) => index === 0 ? [response] : []);
-      unwrap(await this.#requireClient().question.reply({ requestID: pendingId, directory: session.directory, answers }), "question reply");
+      if (request.api === "v2") {
+        unwrap(await this.#requireClient().v2.session.question.reply({
+          sessionID: id,
+          requestID: pendingId,
+          questionV2Reply: { answers },
+        }), "V2 question reply");
+      } else {
+        unwrap(await this.#requireClient().question.reply({ requestID: pendingId, directory: session.directory, answers }), "question reply");
+      }
       this.#questions.delete(pendingId);
     }
     this.registry.setPending(id, null); this.registry.setStatus(id, "running");
@@ -219,15 +238,53 @@ export class OpenCodeManager {
     this.#parts.set(key, part.state.status);
   }
 
-  #syncPending(permissions: PermissionRequest[], questions: QuestionRequest[]): void {
+  async #listPermissions(client: OpencodeClient): Promise<PendingPermission[]> {
+    const [legacyResult, v2Result] = await Promise.all([
+      client.permission.list({ directory: this.directory }),
+      client.v2.permission.request.list({ location: { directory: this.directory } }),
+    ]);
+    if (legacyResult.error && v2Result.error) {
+      throw new Error(`OpenCode permission list failed for both APIs: legacy=${summary(legacyResult.error)}; v2=${summary(v2Result.error)}`);
+    }
+    const permissions = new Map<string, PendingPermission>();
+    if (!legacyResult.error) {
+      for (const permission of legacyResult.data ?? []) permissions.set(permission.id, { ...permission, api: "legacy" });
+    }
+    if (!v2Result.error) {
+      for (const permission of v2Result.data?.data ?? []) permissions.set(permission.id, { ...permission, api: "v2" });
+    }
+    return [...permissions.values()];
+  }
+
+  async #listQuestions(client: OpencodeClient): Promise<PendingQuestion[]> {
+    const [legacyResult, v2Result] = await Promise.all([
+      client.question.list({ directory: this.directory }),
+      client.v2.question.request.list({ location: { directory: this.directory } }),
+    ]);
+    if (legacyResult.error && v2Result.error) {
+      throw new Error(`OpenCode question list failed for both APIs: legacy=${summary(legacyResult.error)}; v2=${summary(v2Result.error)}`);
+    }
+    const questions = new Map<string, PendingQuestion>();
+    if (!legacyResult.error) {
+      for (const question of legacyResult.data ?? []) questions.set(question.id, { ...question, api: "legacy" });
+    }
+    if (!v2Result.error) {
+      for (const question of v2Result.data?.data ?? []) questions.set(question.id, { ...question, api: "v2" });
+    }
+    return [...questions.values()];
+  }
+
+  #syncPending(permissions: PendingPermission[], questions: PendingQuestion[]): void {
     const byPermission = new Map(permissions.map((item) => [item.sessionID, item]));
     const byQuestion = new Map(questions.map((item) => [item.sessionID, item]));
+    this.#permissions = new Map(permissions.map((item) => [item.id, item]));
     this.#questions = new Map(questions.map((item) => [item.id, item]));
     for (const id of this.#sessions.keys()) {
       const current = this.registry.get(id)?.pending; const permission = byPermission.get(id); const question = byQuestion.get(id);
       if (permission) {
         if (current?.id !== permission.id) {
-          const toolName = permission.permission || "tool"; const input = permission.patterns.join(", ");
+          const toolName = permission.api === "v2" ? permission.action : permission.permission || "tool";
+          const input = (permission.api === "v2" ? permission.resources : permission.patterns).join(", ");
           this.registry.setPending(id, { type: "approval", id: permission.id, session_id: id, tool_name: toolName, tool_input_summary: input, requested_at: new Date().toISOString() });
           this.registry.append(id, "permission_request", { approval_id: permission.id, tool_name: toolName, tool_input_summary: input });
         }

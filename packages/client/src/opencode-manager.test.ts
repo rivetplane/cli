@@ -6,7 +6,7 @@ import { OpenCodeManager } from "./opencode-manager.js";
 import { SessionRegistry } from "./registry.js";
 
 test("controls OpenCode sessions through the native SDK", async () => {
-  let pending: "approval" | "question" | "none" = "approval";
+  let pending: "approval" | "approval_v2" | "question" | "question_v2" | "none" = "approval";
   const requests: Array<{ method: string; path: string; body: string }> = [];
   const server = createServer(async (request, response) => {
     let body = ""; for await (const chunk of request) body += chunk;
@@ -26,8 +26,16 @@ test("controls OpenCode sessions through the native SDK", async () => {
     ]));
     else if (path === "/session/open-2/message") response.end("[]");
     else if (path === "/permission") response.end(JSON.stringify(pending === "approval" ? [{ id: "perm-1", sessionID: "open-1", permission: "bash", patterns: ["npm test"], metadata: {}, always: [] }] : []));
+    else if (path === "/api/permission/request") response.end(JSON.stringify({
+      location: { directory: "/repo", project: { id: "p1", directory: "/repo", canonical: "/repo" } },
+      data: pending === "approval_v2" ? [{ id: "perm-v2-1", sessionID: "open-1", action: "bash", resources: ["bun test"] }] : [],
+    }));
     else if (path === "/question") response.end(JSON.stringify(pending === "question" ? [{ id: "question-1", sessionID: "open-1", questions: [{ header: "Mode", question: "Which mode?", options: [{ label: "Safe", description: "Use safe mode" }] }] }] : []));
-    else if (path === "/permission/perm-1/reply" || path === "/question/question-1/reply" || path === "/session/open-1/prompt_async" || path === "/session/open-1/abort") response.end("true");
+    else if (path === "/api/question/request") response.end(JSON.stringify({
+      location: { directory: "/repo", project: { id: "p1", directory: "/repo", canonical: "/repo" } },
+      data: pending === "question_v2" ? [{ id: "question-v2-1", sessionID: "open-1", questions: [{ header: "Mode", question: "Which V2 mode?", options: [{ label: "Safe", description: "Use safe mode" }] }] }] : [],
+    }));
+    else if (path === "/permission/perm-1/reply" || path === "/api/session/open-1/permission/perm-v2-1/reply" || path === "/question/question-1/reply" || path === "/api/session/open-1/question/question-v2-1/reply" || path === "/session/open-1/prompt_async" || path === "/session/open-1/abort") response.end("true");
     else { response.statusCode = 404; response.end(JSON.stringify({ error: "not found" })); }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -42,10 +50,20 @@ test("controls OpenCode sessions through the native SDK", async () => {
     await manager.target("open-1")?.respondToPending("perm-1", "approve", "once");
     assert.equal(JSON.parse(requests.find((item) => item.path === "/permission/perm-1/reply")?.body ?? "{}" as string).reply, "once");
 
+    pending = "approval_v2"; await manager.poll();
+    assert.equal(registry.get("open-1")?.pending?.id, "perm-v2-1");
+    await manager.target("open-1")?.respondToPending("perm-v2-1", "approve", "once");
+    assert.equal(JSON.parse(requests.find((item) => item.path === "/api/session/open-1/permission/perm-v2-1/reply")?.body ?? "{}" as string).reply, "once");
+
     pending = "question"; await manager.poll();
     assert.equal(registry.get("open-1")?.pending?.id, "question-1");
     await manager.target("open-1")?.respondToPending("question-1", "Safe");
     assert.deepEqual(JSON.parse(requests.find((item) => item.path === "/question/question-1/reply")?.body ?? "{}" as string).answers, [["Safe"]]);
+
+    pending = "question_v2"; await manager.poll();
+    assert.equal(registry.get("open-1")?.pending?.id, "question-v2-1");
+    await manager.target("open-1")?.respondToPending("question-v2-1", "Safe");
+    assert.deepEqual(JSON.parse(requests.find((item) => item.path === "/api/session/open-1/question/question-v2-1/reply")?.body ?? "{}" as string).answers, [["Safe"]]);
 
     await manager.target("open-1")?.sendMessage("continue");
     assert.equal(JSON.parse(requests.find((item) => item.path === "/session/open-1/prompt_async")?.body ?? "{}" as string).parts[0].text, "continue");
@@ -67,6 +85,8 @@ test("starts and stops a loopback OpenCode server on an available port", async (
     else if (path === "/session") response.end("[]");
     else if (path === "/session/status") response.end("{}");
     else if (path === "/permission" || path === "/question") response.end("[]");
+    else if (path === "/api/permission/request") response.end(JSON.stringify({ location: { directory: "/repo", project: { id: "p1", directory: "/repo", canonical: "/repo" } }, data: [] }));
+    else if (path === "/api/question/request") response.end(JSON.stringify({ location: { directory: "/repo", project: { id: "p1", directory: "/repo", canonical: "/repo" } }, data: [] }));
     else { response.statusCode = 404; response.end(JSON.stringify({ error: "not found" })); }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
