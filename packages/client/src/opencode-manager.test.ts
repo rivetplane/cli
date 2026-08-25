@@ -57,3 +57,39 @@ test("controls OpenCode sessions through the native SDK", async () => {
     assert.deepEqual(createBody.model, { providerID: "provider-1", id: "model-1" });
   } finally { manager.stop(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+test("starts and stops a loopback OpenCode server on an available port", async () => {
+  const server = createServer((request, response) => {
+    const path = new URL(request.url ?? "/", "http://localhost").pathname;
+    response.setHeader("content-type", "application/json");
+    if (path === "/global/health") response.end(JSON.stringify({ healthy: true, version: "test" }));
+    else if (path === "/provider") response.end(JSON.stringify({ connected: [], default: {}, all: [] }));
+    else if (path === "/session") response.end("[]");
+    else if (path === "/session/status") response.end("{}");
+    else if (path === "/permission" || path === "/question") response.end("[]");
+    else { response.statusCode = 404; response.end(JSON.stringify({ error: "not found" })); }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const launches: Array<{ hostname?: string; port?: number }> = [];
+  let closed = false;
+  const registry = new SessionRegistry();
+  const manager = new OpenCodeManager("machine-1", registry, {
+    directory: "/repo",
+    port_factory: async () => 51_234,
+    server_factory: async (options) => {
+      launches.push({ hostname: options?.hostname, port: options?.port });
+      return { url, close: () => { closed = true; } };
+    },
+  });
+  try {
+    await manager.start();
+    assert.deepEqual(launches, [{ hostname: "127.0.0.1", port: 51_234 }]);
+    assert.equal(manager.url, url);
+    assert.equal(manager.harnesses()[0]?.harness_type, "opencode");
+  } finally {
+    manager.stop();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  assert.equal(closed, true);
+});

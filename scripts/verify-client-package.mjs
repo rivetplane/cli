@@ -3,7 +3,9 @@ import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
+import spawn from "cross-spawn";
+
+const spawnSync = spawn.sync;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const client = join(root, "packages", "client");
@@ -25,9 +27,9 @@ function run(command, args, options = {}) {
   return result.stdout.trim();
 }
 
-async function runStartedClient(binary, env) {
+async function runStartedClient(entrypoint, env) {
   return await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(binary, ["--no-opencode", "--no-relay", "--local-port", "0"], {
+    const child = spawn(process.execPath, [entrypoint, "--no-opencode", "--no-relay", "--local-port", "0"], {
       cwd: installDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -70,7 +72,8 @@ try {
   const packageJson = JSON.parse(await readFile(join(client, "package.json"), "utf8"));
   const installedPackageJson = JSON.parse(await readFile(join(installDirectory, "node_modules", "rivetplane", "package.json"), "utf8"));
   assert.deepEqual(installedPackageJson.bin, { rivetplane: "dist/cli.js" }, "installed package has an invalid bin entry");
-  const installedCli = await readFile(join(installDirectory, "node_modules", "rivetplane", "dist", "cli.js"), "utf8");
+  const installedCliPath = join(installDirectory, "node_modules", "rivetplane", "dist", "cli.js");
+  const installedCli = await readFile(installedCliPath, "utf8");
   assert(installedCli.startsWith("#!/usr/bin/env node\n"), "installed CLI has no Node shebang");
   assert.match(run(binary, ["--help"], { cwd: installDirectory }), /Usage:\s+rivetplane/);
   assert.equal(run(binary, ["--version"], { cwd: installDirectory }), packageJson.version);
@@ -78,11 +81,11 @@ try {
 
   const env = { ...process.env, HOME: homeDirectory, XDG_CONFIG_HOME: join(homeDirectory, ".config") };
   assert.match(run(binary, ["login", "--server", "https://example.invalid", "--machine", "package-test", "--token", "test-token"], { cwd: installDirectory, env }), /Paired machine/);
-  const started = await runStartedClient(binary, env);
+  const started = await runStartedClient(installedCliPath, env);
   assert.match(started, /Relay: disabled/);
 
   process.stdout.write(`Verified ${packed[0].name}@${packed[0].version} (${packed[0].size} bytes, ${files.length} files).\n`);
   process.stdout.write("Verified dry-run contents, clean tarball install, npx, help, version, login, and start.\n");
 } finally {
-  await rm(temporary, { recursive: true, force: true });
+  await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { SessionDiscovery, parseDescriptor } from "./discovery.js";
 
 test("parses WebSocket and socket discovery records", () => {
   assert.equal(parseDescriptor({ session_id: "s1", harness_type: "codex", cwd: "/tmp", endpoint: "ws://127.0.0.1:9999/acp" }).transport.kind, "websocket");
-  assert.deepEqual(parseDescriptor({ id: "s2", harness: "claude", cwd: "/tmp", socket_path: "/tmp/acp.sock" }).transport, { kind: "unix", path: "/tmp/acp.sock" });
+  assert.deepEqual(parseDescriptor({ id: "s2", harness: "claude", cwd: "/tmp", socket_path: "/tmp/acp.sock" }).transport, { kind: "unix", path: resolve("/tmp/acp.sock") });
 });
 
 test("scans valid records and reports invalid records without failing", async () => {

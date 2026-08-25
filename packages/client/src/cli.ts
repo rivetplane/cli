@@ -14,8 +14,8 @@ Usage:
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
   rivetplane --help
 
-The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, detects an
-OpenCode server at http://localhost:4096, and exposes the local API at
+The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, starts a
+loopback-only OpenCode server when OpenCode is installed, and exposes the local API at
 http://127.0.0.1:PORT/v1. Login uses https://rivetplane.com unless --server or
 HARNESS_CP_SERVER selects a self-hosted control plane.`;
 
