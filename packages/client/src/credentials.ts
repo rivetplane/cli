@@ -14,6 +14,12 @@ export interface Credentials {
   token: string;
 }
 
+export const DEFAULT_SERVER_URL = "https://rivetplane.com";
+
+export function resolveServerUrl(option?: string, environment?: string): string {
+  return option ?? environment ?? DEFAULT_SERVER_URL;
+}
+
 export function credentialsPath(): string { return join(homedir(), ".config", "harness-cp", "credentials"); }
 export function deviceIdentityPath(credentials = credentialsPath()): string { return join(dirname(credentials), "device-id"); }
 
@@ -42,10 +48,15 @@ export async function writeCredentials(credentials: Credentials, path = credenti
 
 export interface LoginOptions { server_url: string; machine_name?: string; open_browser?: (url: string) => Promise<void>; timeout_ms?: number; credentials_path?: string; device_identity_path?: string }
 
+export function browserLaunch(platform: NodeJS.Platform, url: string): { command: string; args: string[] } {
+  if (platform === "darwin") return { command: "open", args: [url] };
+  if (platform === "win32") return { command: "explorer.exe", args: [url] };
+  return { command: "xdg-open", args: [url] };
+}
+
 async function defaultOpenBrowser(url: string): Promise<void> {
   const { spawn } = await import("node:child_process");
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const { command, args } = browserLaunch(process.platform, url);
   const child = spawn(command, args, { detached: true, stdio: "ignore" }); child.unref();
 }
 

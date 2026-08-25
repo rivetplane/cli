@@ -1,6 +1,6 @@
 {
   "name": "rivetplane",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Connect local agent harnesses to the Rivetplane control plane",
   "keywords": [
     "acp",
@@ -21,7 +21,7 @@
   },
   "type": "module",
   "bin": {
-    "rivetplane": "./dist/cli.js"
+    "rivetplane": "dist/cli.js"
   },
   "files": [
     "dist/*.js",
