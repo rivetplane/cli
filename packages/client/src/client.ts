@@ -19,6 +19,7 @@ export interface ClientOptions {
   opencode_directory?: string;
   opencode_executable?: string;
   opencode_checkpoint_path?: string;
+  opencode_max_sessions_per_project?: number;
 }
 
 export class HarnessControlClient {
@@ -36,6 +37,7 @@ export class HarnessControlClient {
     if (options.opencode_url !== false && exportEnabled) this.opencode_exports = new OpenCodeExportDiscovery(machineId, this.manager.registry, {
       ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.opencode_executable ? { executable: options.opencode_executable } : {}),
       ...(options.opencode_checkpoint_path ? { checkpoint_path: options.opencode_checkpoint_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
+      ...(options.opencode_max_sessions_per_project ? { max_sessions_per_project: options.opencode_max_sessions_per_project } : {}),
     });
     const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.opencode_exports?.target(id);
     this.local_api = new LocalApi(this.manager.registry, { port: options.local_port ?? 41737, target,

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { access, mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
@@ -19,6 +19,12 @@ export interface OpenCodeListSession {
   projectId?: string;
   created?: number | string;
   updated?: number | string;
+}
+
+export interface OpenCodeProject {
+  id: string;
+  worktree: string;
+  sandboxes: string[];
 }
 
 export interface CommandResult { stdout: string; stderr: string }
@@ -43,9 +49,13 @@ export interface OpenCodeExportDiscoveryOptions {
   max_output_bytes?: number;
   max_sessions?: number;
   max_exports_per_poll?: number;
+  max_sessions_per_project?: number;
+  database_page_size?: number;
+  max_database_pages?: number;
   concurrency?: number;
   recent_window_ms?: number;
   runner?: CommandRunner;
+  file_runner?: CommandRunner;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
 }
@@ -97,6 +107,16 @@ export function parseSessionList(stdout: string): OpenCodeListSession[] {
     if (!item || !id) return [];
     return [{ id, title: string(item.title), directory: string(item.directory), projectId: string(item.projectId ?? item.projectID),
       created: number(item.created) ?? string(item.created), updated: number(item.updated) ?? string(item.updated) }];
+  });
+}
+
+export function parseProjectList(stdout: string): OpenCodeProject[] {
+  const parsed = parseCommandJson(stdout);
+  if (!Array.isArray(parsed)) throw new Error("project list JSON is not an array");
+  return parsed.flatMap((value) => {
+    const item = object(value); const id = string(item?.id); const worktree = string(item?.worktree);
+    if (!item || !id || !worktree) return [];
+    return [{ id, worktree, sandboxes: array(item.sandboxes).flatMap((sandbox) => typeof sandbox === "string" ? [sandbox] : []) }];
   });
 }
 
@@ -158,10 +178,38 @@ export const runBoundedCommand: CommandRunner = (program, args, options) => new 
   timer.unref();
 });
 
-function shellListCommand(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, cwd: string, timeout_ms: number, max_output_bytes: number, runner: CommandRunner): Promise<CommandResult> {
-  // The command text is constant. No session ID or other external value enters it.
-  if (platform === "win32") return runner(env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "opencode session list --format json"], { cwd, timeout_ms, max_output_bytes });
-  return runner(env.SHELL ?? "/bin/sh", ["-lc", "opencode session list --format json"], { cwd, timeout_ms, max_output_bytes });
+/** Use a regular file for stdout to avoid OpenCode pipe-flush truncation. */
+export const runBoundedCommandToFile: CommandRunner = async (program, args, options) => {
+  const temporary = await mkdtemp(join(tmpdir(), "rivetplane-opencode-output-")); const outputPath = join(temporary, "stdout.json"); const output = await open(outputPath, "w");
+  try {
+    const stderr = await new Promise<string>((resolve, reject) => {
+      const child = crossSpawn(program, [...args], { cwd: options.cwd, detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", output.fd, "pipe"] });
+      let errorOutput = ""; let errorSize = 0; let settled = false;
+      const fail = (error: Error): void => { if (settled) return; settled = true; clearTimeout(timer); clearInterval(sizeTimer); void terminate(child).finally(() => reject(error)); };
+      child.stderr?.on("data", (chunk: Buffer) => {
+        errorSize += chunk.byteLength;
+        if (errorSize > options.max_output_bytes) { fail(new Error(`OpenCode command stderr exceeded ${options.max_output_bytes} bytes`)); return; }
+        errorOutput += chunk.toString("utf8");
+      });
+      child.once("error", (error) => fail(error));
+      child.once("exit", (code, signal) => {
+        if (settled) return; settled = true; clearTimeout(timer); clearInterval(sizeTimer);
+        if (code === 0) resolve(errorOutput); else reject(new Error(`OpenCode command failed (${code ?? signal ?? "unknown"}): ${errorOutput.trim().slice(0, 500)}`));
+      });
+      const timer = setTimeout(() => fail(new Error(`OpenCode command timed out after ${options.timeout_ms} ms`)), options.timeout_ms); timer.unref();
+      const sizeTimer = setInterval(() => void stat(outputPath).then((value) => { if (value.size > options.max_output_bytes) fail(new Error(`OpenCode command output exceeded ${options.max_output_bytes} bytes`)); }).catch(() => undefined), 100); sizeTimer.unref();
+    });
+    await output.close(); const size = (await stat(outputPath)).size;
+    if (size > options.max_output_bytes) throw new Error(`OpenCode command output exceeded ${options.max_output_bytes} bytes`);
+    return { stdout: await readFile(outputPath, "utf8"), stderr };
+  } finally { await output.close().catch(() => undefined); await rm(temporary, { recursive: true, force: true }); }
+};
+
+function shellListCommand(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, cwd: string, timeout_ms: number, max_output_bytes: number, max_sessions: number, runner: CommandRunner): Promise<CommandResult> {
+  // The command contains fixed tokens and a validated integer. No session ID enters it.
+  const command = `opencode session list --format json --max-count ${max_sessions}`;
+  if (platform === "win32") return runner(env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command], { cwd, timeout_ms, max_output_bytes });
+  return runner(env.SHELL ?? "/bin/sh", ["-lc", command], { cwd, timeout_ms, max_output_bytes });
 }
 
 function questionFromPart(sessionId: string, part: RecordValue): Question | undefined {
@@ -264,17 +312,22 @@ export class OpenCodeExportDiscovery {
       this.#executable ??= await resolveOpenCodeExecutable(this.options);
       if (!this.#executable) { this.#diagnostic("OpenCode executable was not found; export discovery is inactive"); return; }
       const command = this.options.runner ?? runBoundedCommand; const common = this.#commandOptions();
-      let result = await command(this.#executable, [...(this.options.executable_args ?? []), "session", "list", "--format", "json"], common);
-      if (!result.stdout.trim()) {
-        this.#diagnostic("OpenCode session list returned empty stdout; retrying once through the platform shell");
-        try { result = await shellListCommand(this.options.platform ?? process.platform, this.options.env ?? process.env, this.directory, common.timeout_ms, common.max_output_bytes, command); }
-        catch (error) { this.registry.emit("warning", new Error(`OpenCode shell retry failed: ${error instanceof Error ? error.message : String(error)}`)); }
+      const scopes = await this.#projectScopes(command, common);
+      const listedResult = await this.#listAllScopes(scopes.directories, command, common);
+      let listed = listedResult.sessions; let databaseAuthoritative = false;
+      if (scopes.requiresIndex || !scopes.complete || !listedResult.authoritative || listedResult.saturated) {
+        try {
+          listed = this.#mergeSessions(listed, await this.#listDatabasePages(common)); databaseAuthoritative = true;
+          this.#diagnostic(`OpenCode used the bounded database-index fallback and found ${listed.length} unique root sessions`);
+        } catch (error) {
+          this.#diagnostic(`OpenCode database-index fallback failed; discovery coverage is partial: ${error instanceof Error ? error.message : String(error)}`, true);
+        }
       }
-      if (!result.stdout.trim()) { this.#diagnostic("OpenCode session list returned empty stdout after retry; treating the successful empty result as no sessions"); result = { ...result, stdout: "[]" }; }
-      const listed = parseSessionList(result.stdout).sort((a, b) => this.#updated(b) - this.#updated(a));
+      listed.sort((a, b) => this.#updated(b) - this.#updated(a));
       const next = new Set(listed.map((session) => session.id));
-      for (const id of this.#present) if (!next.has(id)) this.registry.remove(id);
-      this.#present = next;
+      const authoritative = databaseAuthoritative || (scopes.complete && listedResult.authoritative && !listedResult.saturated);
+      if (authoritative) for (const id of this.#present) if (!next.has(id)) this.registry.remove(id);
+      this.#present = authoritative ? next : new Set([...this.#present, ...next]);
       for (const session of listed) this.#upsertListSnapshot(session);
       const recentAfter = Date.now() - (this.options.recent_window_ms ?? 5 * 60_000);
       const changed = listed.filter((session) => !this.#seenRuntime.has(session.id) || this.#checkpoints.sessions[session.id]?.updated !== session.updated);
@@ -290,6 +343,94 @@ export class OpenCodeExportDiscovery {
   #commandOptions(): { cwd: string; timeout_ms: number; max_output_bytes: number } {
     return { cwd: this.directory, timeout_ms: this.options.timeout_ms ?? 10_000, max_output_bytes: this.options.max_output_bytes ?? 16 * 1024 * 1024 };
   }
+  async #projectScopes(command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<{ directories: string[]; complete: boolean; requiresIndex: boolean }> {
+    const scopes = new Set([this.directory]); let complete = true; let requiresIndex = false;
+    try {
+      const result = await command(this.#executable!, [...(this.options.executable_args ?? []), "debug", "scrap"], common);
+      let missing = 0; const directoryProjects = new Map<string, string>();
+      for (const project of parseProjectList(result.stdout)) {
+        const candidates = [project.worktree, ...project.sandboxes]; let selected: string | undefined;
+        for (const candidate of candidates) {
+          try { await access(candidate, constants.F_OK); scopes.add(candidate); selected = candidate; break; } catch { /* try the next known directory */ }
+        }
+        if (!selected) { missing++; complete = false; requiresIndex = true; continue; }
+        const prior = directoryProjects.get(selected);
+        if (prior && prior !== project.id) { requiresIndex = true; this.#diagnostic(`OpenCode project records ${prior} and ${project.id} share ${selected}; the directory scope is scanned once and the database index completes project identity coverage`); }
+        else directoryProjects.set(selected, project.id);
+      }
+      if (missing > 0) this.#diagnostic(`OpenCode project discovery skipped ${missing} project${missing === 1 ? "" : "s"} with no accessible worktree or sandbox; the database-index fallback was requested`, true);
+      this.#diagnostic(`OpenCode project discovery found ${scopes.size} directory scope${scopes.size === 1 ? "" : "s"}`);
+    } catch (error) {
+      complete = false; requiresIndex = true;
+      this.#diagnostic(`OpenCode project discovery is unavailable; scanning seed directory ${this.directory} and requesting the database-index fallback: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
+    return { directories: [...scopes], complete, requiresIndex };
+  }
+  async #listAllScopes(scopes: string[], command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<{ sessions: OpenCodeListSession[]; authoritative: boolean; saturated: boolean }> {
+    const combined = new Map<string, OpenCodeListSession>(); let failures = 0; let duplicates = 0; let saturated = false;
+    await this.#mapLimit(scopes, this.options.concurrency ?? 4, async (directory) => {
+      try {
+        const sessions = await this.#listScope(directory, command, common);
+        if (sessions.length >= this.#scopeLimit()) saturated = true;
+        for (const session of sessions) {
+          const prior = combined.get(session.id); if (prior) duplicates++;
+          if (!prior || this.#updated(session) > this.#updated(prior)) combined.set(session.id, session);
+        }
+      } catch (error) {
+        failures++; this.registry.emit("warning", new Error(`Cannot list OpenCode sessions for ${directory}: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    });
+    if (duplicates > 0) this.#diagnostic(`OpenCode project discovery removed ${duplicates} duplicate session result${duplicates === 1 ? "" : "s"}`);
+    if (failures === 0) this.#diagnostic(`OpenCode machine discovery covered ${scopes.length} project scope${scopes.length === 1 ? "" : "s"} and found ${combined.size} unique session${combined.size === 1 ? "" : "s"}`);
+    else this.#diagnostic(`OpenCode machine discovery completed with ${failures} failed project scope${failures === 1 ? "" : "s"}; the database-index fallback was requested`, true);
+    return { sessions: [...combined.values()], authoritative: failures === 0, saturated };
+  }
+  async #listScope(directory: string, command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<OpenCodeListSession[]> {
+    const max = this.#scopeLimit();
+    let result = await command(this.#executable!, [...(this.options.executable_args ?? []), "session", "list", "--format", "json", "--max-count", String(max)], { ...common, cwd: directory });
+    if (!result.stdout.trim()) {
+      this.#diagnostic("OpenCode session list returned empty stdout; retrying once through the platform shell");
+      try { result = await shellListCommand(this.options.platform ?? process.platform, this.options.env ?? process.env, directory, common.timeout_ms, common.max_output_bytes, max, command); }
+      catch (error) { this.registry.emit("warning", new Error(`OpenCode shell retry failed for ${directory}: ${error instanceof Error ? error.message : String(error)}`)); }
+    }
+    let sessions: OpenCodeListSession[];
+    try {
+      if (!result.stdout.trim()) throw new Error("command returned empty stdout");
+      sessions = parseSessionList(result.stdout);
+    } catch (error) {
+      this.#diagnostic(`OpenCode session list output was empty, malformed, or truncated in ${directory}; retrying with file-backed stdout: ${error instanceof Error ? error.message : String(error)}`);
+      const fileCommand = this.options.file_runner ?? (this.options.runner ? command : runBoundedCommandToFile);
+      const fileResult = await fileCommand(this.#executable!, [...(this.options.executable_args ?? []), "session", "list", "--format", "json", "--max-count", String(max)], { ...common, cwd: directory });
+      if (!fileResult.stdout.trim()) { this.#diagnostic("OpenCode session list returned empty stdout after all retries; treating the successful empty result as no sessions"); sessions = []; }
+      else sessions = parseSessionList(fileResult.stdout);
+    }
+    if (sessions.length >= max) this.#diagnostic(`OpenCode session list reached the explicit limit of ${max} in ${directory}; bounded database-index pagination will complete coverage`);
+    return sessions;
+  }
+  #scopeLimit(): number {
+    const value = this.options.max_sessions_per_project ?? 200;
+    return Number.isSafeInteger(value) && value > 0 ? value : 200;
+  }
+  async #listDatabasePages(common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<OpenCodeListSession[]> {
+    const pageSize = Number.isSafeInteger(this.options.database_page_size) && (this.options.database_page_size ?? 0) > 0 ? this.options.database_page_size! : 1_000;
+    const maxPages = Number.isSafeInteger(this.options.max_database_pages) && (this.options.max_database_pages ?? 0) > 0 ? this.options.max_database_pages! : 100;
+    const command = this.options.file_runner ?? (this.options.runner ? this.options.runner : runBoundedCommandToFile); const sessions: OpenCodeListSession[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      const offset = page * pageSize;
+      const query = `SELECT id, title, time_updated AS updated, time_created AS created, project_id AS projectId, directory FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC, id DESC LIMIT ${pageSize} OFFSET ${offset}`;
+      const result = await command(this.#executable!, [...(this.options.executable_args ?? []), "db", query, "--format", "json"], common);
+      const values = parseSessionList(result.stdout); sessions.push(...values);
+      if (values.length < pageSize) return this.#mergeSessions([], sessions);
+    }
+    throw new Error(`database session index exceeded ${maxPages} pages of ${pageSize}`);
+  }
+  #mergeSessions(left: OpenCodeListSession[], right: OpenCodeListSession[]): OpenCodeListSession[] {
+    const combined = new Map<string, OpenCodeListSession>();
+    for (const session of [...left, ...right]) {
+      const prior = combined.get(session.id); if (!prior || this.#updated(session) > this.#updated(prior)) combined.set(session.id, session);
+    }
+    return [...combined.values()];
+  }
   #updated(session: OpenCodeListSession): number { return typeof session.updated === "number" ? session.updated : Date.parse(session.updated ?? "") || 0; }
   #upsertListSnapshot(listed: OpenCodeListSession): void {
     const current = this.registry.get(listed.id); const pending = current?.pending ?? this.#checkpoints.sessions[listed.id]?.pending ?? null;
@@ -299,7 +440,8 @@ export class OpenCodeExportDiscovery {
   }
   async #export(listed: OpenCodeListSession, command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<void> {
     try {
-      const output = await command(this.#executable!, [...(this.options.executable_args ?? []), "export", listed.id], common);
+      const fileCommand = this.options.file_runner ?? (this.options.runner ? command : runBoundedCommandToFile);
+      const output = await fileCommand(this.#executable!, [...(this.options.executable_args ?? []), "export", listed.id], common);
       const exported = parseSessionExport(output.stdout); this.#syncExport(listed, exported.info, exported.messages); this.#seenRuntime.add(listed.id);
     } catch (error) { this.registry.emit("warning", new Error(`Cannot export OpenCode session ${listed.id}: ${error instanceof Error ? error.message : String(error)}`)); }
   }
@@ -363,7 +505,8 @@ export class OpenCodeExportDiscovery {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.registry.emit("warning", new Error("OpenCode checkpoint is malformed; discovery will rebuild it")); }
   }
   async #save(): Promise<void> {
-    const ordered = Object.entries(this.#checkpoints.sessions).sort(([, a], [, b]) => (epoch(b.updated) ?? 0) - (epoch(a.updated) ?? 0)).slice(0, this.options.max_sessions ?? 1_000);
+    const ordered = Object.entries(this.#checkpoints.sessions).sort(([, a], [, b]) => (epoch(b.updated) ?? 0) - (epoch(a.updated) ?? 0));
+    if (this.options.max_sessions !== undefined) ordered.splice(this.options.max_sessions);
     this.#checkpoints.sessions = Object.fromEntries(ordered);
     await mkdir(dirname(this.checkpoint_path), { recursive: true, mode: 0o700 }); const temporary = `${this.checkpoint_path}.${process.pid}.tmp`;
     await writeFile(temporary, `${JSON.stringify(this.#checkpoints)}\n`, { mode: 0o600 }); await rename(temporary, this.checkpoint_path);

@@ -11,7 +11,7 @@ const { version } = require("../package.json") as { version: string };
 const HELP = `Rivetplane local client
 
 Usage:
-  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--no-opencode] [--no-opencode-export] [--no-relay]
+  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--opencode-max-sessions-per-project COUNT] [--no-opencode] [--no-opencode-export] [--no-relay]
   rivetplane --opencode-url URL [client options]
   rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
@@ -48,6 +48,8 @@ async function main(): Promise<void> {
   const discoveryDirectory = flag("--discovery-dir");
   const localPort = Number(flag("--local-port") ?? process.env.HARNESS_CP_LOCAL_PORT ?? 41737);
   if (!Number.isInteger(localPort) || localPort < 0 || localPort > 65_535) throw new Error("--local-port must be a valid port");
+  const maxOpenCodeSessions = Number(flag("--opencode-max-sessions-per-project") ?? process.env.HARNESS_CP_OPENCODE_MAX_SESSIONS_PER_PROJECT ?? 200);
+  if (!Number.isSafeInteger(maxOpenCodeSessions) || maxOpenCodeSessions <= 0) throw new Error("--opencode-max-sessions-per-project must be a positive integer");
   const client = new HarnessControlClient({
     ...(credentials ? { credentials } : {}),
     ...(discoveryDirectory ? { discovery_directory: discoveryDirectory } : {}),
@@ -59,6 +61,7 @@ async function main(): Promise<void> {
     opencode_directory: flag("--opencode-directory") ?? process.env.HARNESS_CP_OPENCODE_DIRECTORY ?? process.cwd(),
     opencode_executable: flag("--opencode-executable") ?? process.env.HARNESS_CP_OPENCODE_EXECUTABLE,
     opencode_checkpoint_path: flag("--opencode-checkpoint") ?? process.env.HARNESS_CP_OPENCODE_CHECKPOINT,
+    opencode_max_sessions_per_project: maxOpenCodeSessions,
   });
   client.manager.registry.on("log", (message) => process.stderr.write(`${String(message)}\n`));
   const started = await client.start();

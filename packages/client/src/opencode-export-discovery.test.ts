@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import { OpenCodeExportDiscovery, parseSessionExport, parseSessionList, resolveOpenCodeExecutable, runBoundedCommand, type CommandRunner } from "./opencode-export-discovery.js";
+import { OpenCodeExportDiscovery, parseProjectList, parseSessionExport, parseSessionList, resolveOpenCodeExecutable, runBoundedCommand, runBoundedCommandToFile, type CommandRunner } from "./opencode-export-discovery.js";
 import { SessionRegistry } from "./registry.js";
 import { HarnessControlClient } from "./client.js";
 
@@ -17,12 +17,42 @@ test("uses export discovery by default and keeps direct HTTP discovery explicit"
 });
 
 test("parses the OpenCode list and representative export fixtures", async () => {
+  const projects = parseProjectList(await fixture("project-list.json"));
+  assert.deepEqual(projects.map((project) => project.id), ["project-a", "project-b", "global"]);
+  assert.deepEqual(projects[1]?.sandboxes, ["/projects/b-sandbox"]);
   const sessions = parseSessionList(await fixture("session-list.json"));
   assert.equal(sessions[0]?.id, "ses_question");
   assert.equal(sessions[0]?.directory, "/work/project");
   const exported = parseSessionExport(await fixture("export-question-running.json"));
   assert.equal(exported.info.id, "ses_question");
   assert.equal(exported.messages[1]?.parts[1]?.tool, "question");
+});
+
+test("combines two project scopes and the global bucket when started from another repository", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-opencode-projects-")); const projectA = join(root, "project-a"); const projectB = join(root, "project-b"); const globalBucket = join(root, "global");
+  await Promise.all([mkdir(projectA), mkdir(projectB), mkdir(globalBucket)]); const questionExport = await fixture("export-question-running.json"); const listCalls: Array<{ cwd: string; args: readonly string[] }> = [];
+  const projects = [{ id: "a", worktree: projectA, sandboxes: [] }, { id: "b", worktree: projectB, sandboxes: [] }, { id: "global", worktree: globalBucket, sandboxes: [] }];
+  const scopedFixture = async (name: string, marker: string, directory: string): Promise<unknown[]> => JSON.parse((await fixture(name)).replaceAll(marker, directory)) as unknown[];
+  const sessionsByDirectory: Record<string, unknown[]> = {
+    [projectA]: await scopedFixture("session-list-project-a.json", "__PROJECT_A__", projectA),
+    [projectB]: await scopedFixture("session-list-project-b.json", "__PROJECT_B__", projectB),
+    [globalBucket]: await scopedFixture("session-list-global.json", "__GLOBAL__", globalBucket),
+  };
+  const runner: CommandRunner = async (_program, args, options) => {
+    if (args[0] === "debug") return { stdout: JSON.stringify(projects), stderr: "" };
+    if (args.includes("list")) { listCalls.push({ cwd: options.cwd, args }); return { stdout: JSON.stringify(sessionsByDirectory[options.cwd] ?? []), stderr: "" }; }
+    const id = args.at(-1); if (id === "ses_question") return { stdout: questionExport, stderr: "" };
+    return { stdout: JSON.stringify({ info: { id, directory: sessionsByDirectory[projectB]?.some((item) => (item as { id?: string }).id === id) ? projectB : globalBucket, time: { created: 1, updated: 2 } }, messages: [] }), stderr: "" };
+  };
+  try {
+    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory: projectB, checkpoint_path: join(root, "cp.json"), runner });
+    await manager.poll();
+    assert.deepEqual(registry.list().map((session) => session.id).sort(), ["ses_b", "ses_global", "ses_question"]);
+    assert.equal(registry.get("ses_question")?.pending?.id, "call_question_1");
+    assert.equal(sessionsByDirectory[projectA]?.some((left) => sessionsByDirectory[projectB]?.some((right) => (left as { id: string }).id === (right as { id: string }).id)), false);
+    assert.deepEqual(new Set(listCalls.map((call) => call.cwd)), new Set([projectA, projectB, globalBucket]));
+    assert.equal(listCalls.every((call) => call.args.includes("--max-count") && call.args.includes("200")), true); manager.stop();
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("discovers one full pending question, deduplicates polls and restart, then clears it", async () => {
@@ -106,31 +136,68 @@ test("resolves OpenCode executables with Unix and Windows PATH rules", async () 
 
 test("retries empty Windows list output through a fixed safe shell command", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-windows-retry-")); const calls: Array<{ program: string; args: readonly string[] }> = [];
-  const runner: CommandRunner = async (program, args) => { calls.push({ program, args }); return calls.length === 1 ? { stdout: "", stderr: "" } : { stdout: "[]", stderr: "" }; };
+  const runner: CommandRunner = async (program, args) => { calls.push({ program, args }); return args[0] === "debug" || calls.length === 3 ? { stdout: "[]", stderr: "" } : { stdout: "", stderr: "" }; };
   try {
     const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner, platform: "win32", env: { ComSpec: "C:\\Windows\\System32\\cmd.exe" } });
-    await manager.poll(); assert.equal(calls.length, 2); assert.equal(calls[1]?.program, "C:\\Windows\\System32\\cmd.exe");
-    assert.deepEqual(calls[1]?.args, ["/d", "/s", "/c", "opencode session list --format json"]); manager.stop();
+    await manager.poll(); assert.equal(calls.length, 3); assert.equal(calls[2]?.program, "C:\\Windows\\System32\\cmd.exe");
+    assert.deepEqual(calls[2]?.args, ["/d", "/s", "/c", "opencode session list --format json --max-count 200"]); manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("detects successful output truncated at exactly 64 KiB and retries with file-backed stdout", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-file-retry-")); let fileCalls = 0;
+  const truncated = ('[{"id":"ses_large"},' + " ".repeat(65_536)).slice(0, 65_536); assert.equal(Buffer.byteLength(truncated), 65_536);
+  const runner: CommandRunner = async (_program, args) => args[0] === "debug" ? { stdout: JSON.stringify([{ id: "p1", worktree: directory, sandboxes: [] }]), stderr: "" } : { stdout: truncated, stderr: "" };
+  const fileRunner: CommandRunner = async (_program, args) => {
+    fileCalls++;
+    if (args[0] === "export") return { stdout: JSON.stringify({ info: { id: "ses_large", directory, time: { created: 1, updated: 2 } }, messages: [] }), stderr: "" };
+    return { stdout: JSON.stringify([{ id: "ses_large", directory, created: 1, updated: 2 }]), stderr: "" };
+  };
+  try {
+    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner });
+    await manager.poll(); assert.equal(registry.get("ses_large")?.id, "ses_large"); assert.equal(fileCalls, 2); manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("uses bounded database pages when a project scope reaches its safe list limit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-db-pages-")); let databaseCalls = 0;
+  const listed = [{ id: "ses_1", directory, created: 1, updated: 3 }, { id: "ses_2", directory, created: 1, updated: 2 }];
+  const indexed = [...listed, { id: "ses_3", directory, created: 1, updated: 1 }];
+  const runner: CommandRunner = async (_program, args) => args[0] === "debug" ? { stdout: JSON.stringify([{ id: "p1", worktree: directory, sandboxes: [] }]), stderr: "" } : { stdout: JSON.stringify(listed), stderr: "" };
+  const fileRunner: CommandRunner = async (_program, args) => {
+    if (args[0] === "db") {
+      databaseCalls++; const offset = Number(/OFFSET (\d+)/.exec(String(args[1]))?.[1] ?? 0);
+      return { stdout: JSON.stringify(indexed.slice(offset, offset + 2)), stderr: "" };
+    }
+    const id = String(args.at(-1)); return { stdout: JSON.stringify({ info: { id, directory, time: { created: 1, updated: 2 } }, messages: [] }), stderr: "" };
+  };
+  try {
+    const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner, max_sessions_per_project: 2, database_page_size: 2 });
+    await manager.poll(); assert.deepEqual(registry.list().map((session) => session.id).sort(), ["ses_1", "ses_2", "ses_3"]); assert.equal(databaseCalls, 2); manager.stop();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("bounds command time and output and cleans up the subprocess", async () => {
   await assert.rejects(runBoundedCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: process.cwd(), timeout_ms: 30, max_output_bytes: 1_024 }), /timed out/);
   await assert.rejects(runBoundedCommand(process.execPath, ["-e", "process.stdout.write('x'.repeat(4096))"], { cwd: process.cwd(), timeout_ms: 2_000, max_output_bytes: 100 }), /output exceeded/);
+  const fileResult = await runBoundedCommandToFile(process.execPath, ["-e", "process.stdout.write('x'.repeat(200000))"], { cwd: process.cwd(), timeout_ms: 2_000, max_output_bytes: 300_000 });
+  assert.equal(fileResult.stdout.length, 200_000);
+  await assert.rejects(runBoundedCommandToFile(process.execPath, ["-e", "process.stdout.write('x'.repeat(4096))"], { cwd: process.cwd(), timeout_ms: 2_000, max_output_bytes: 100 }), /output exceeded/);
 });
 
 test("runs list, export, update, and disappearance through a fake OpenCode executable", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-e2e-")); const statePath = join(directory, "state.json"); const fakePath = join(directory, "fake-opencode.mjs"); const checkpoint = join(directory, "cp.json");
   const running = JSON.parse(await fixture("export-question-running.json")) as unknown; const completed = JSON.parse(await fixture("export-question-completed.json")) as unknown;
-  const fake = `import { readFileSync } from "node:fs";\nconst state = JSON.parse(readFileSync(process.argv[2], "utf8"));\nconst args = process.argv.slice(3);\nif (args[0] === "session") process.stdout.write(JSON.stringify(state.sessions));\nelse if (args[0] === "export") { const value = state.exports[args[1]]; if (!value) process.exit(2); process.stdout.write(JSON.stringify(value)); }\nelse process.exit(3);\n`;
+  const fake = `import { readFileSync } from "node:fs";\nconst state = JSON.parse(readFileSync(process.argv[2], "utf8"));\nconst args = process.argv.slice(3);\nif (args[0] === "debug") process.stdout.write(JSON.stringify(state.projects));\nelse if (args[0] === "session") process.stdout.write(JSON.stringify(state.sessions));\nelse if (args[0] === "export") { const value = state.exports[args[1]]; if (!value) process.exit(2); process.stdout.write(JSON.stringify(value)); }\nelse process.exit(3);\n`;
   try {
-    await writeFile(fakePath, fake, "utf8"); await writeFile(statePath, JSON.stringify({ sessions: [{ id: "ses_question", directory, updated: 1 }], exports: { ses_question: running } }), "utf8");
+    const projects = [{ id: "fake-project", worktree: directory, sandboxes: [] }];
+    await writeFile(fakePath, fake, "utf8"); await writeFile(statePath, JSON.stringify({ projects, sessions: [{ id: "ses_question", directory, updated: 1 }], exports: { ses_question: running } }), "utf8");
     const registry = new SessionRegistry(); const removed: string[] = []; registry.on("removed", (id) => removed.push(String(id)));
     const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, executable_args: [fakePath, statePath], checkpoint_path: checkpoint, directory, timeout_ms: 2_000 });
     await manager.poll(); assert.equal(registry.get("ses_question")?.pending?.id, "call_question_1");
-    await writeFile(statePath, JSON.stringify({ sessions: [{ id: "ses_question", directory, updated: 2 }], exports: { ses_question: completed } }), "utf8");
+    await writeFile(statePath, JSON.stringify({ projects, sessions: [{ id: "ses_question", directory, updated: 2 }], exports: { ses_question: completed } }), "utf8");
     await manager.poll(); assert.equal(registry.get("ses_question")?.pending, null);
-    await writeFile(statePath, JSON.stringify({ sessions: [], exports: {} }), "utf8"); await manager.poll();
+    await writeFile(statePath, JSON.stringify({ projects, sessions: [], exports: {} }), "utf8"); await manager.poll();
     assert.equal(registry.get("ses_question"), undefined); assert.deepEqual(removed, ["ses_question"]); manager.stop();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
