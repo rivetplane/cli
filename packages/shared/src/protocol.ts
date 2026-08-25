@@ -24,6 +24,21 @@ export interface HarnessCapabilities {
   models: HarnessModel[];
   default_model?: { provider_id: string; model_id: string };
   reported_at: Timestamp;
+  /** Independent existing-session adapter capabilities. Omitted by older clients. */
+  session_capabilities?: {
+    discovery: CapabilitySupport;
+    transcript: CapabilitySupport;
+    messaging: CapabilitySupport;
+    question_response: CapabilitySupport;
+    approval_response: CapabilitySupport;
+  };
+  harness_version?: string;
+}
+
+export interface CapabilitySupport {
+  supported: boolean;
+  mode: "read_only" | "read_write" | "unsupported";
+  reason?: string;
 }
 
 export const PROTOCOL_VERSION = 1 as const;

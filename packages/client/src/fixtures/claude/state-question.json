@@ -1,0 +1,22 @@
+{
+  "state": "working",
+  "detail": "starting…",
+  "tempo": "blocked",
+  "name": "Disposable test",
+  "sessionId": "11111111-2222-4333-8444-555555555555",
+  "cwd": "/private/tmp/claude-project",
+  "createdAt": "2026-08-25T15:40:13.739Z",
+  "updatedAt": "2026-08-25T15:40:18.990Z",
+  "needs": "answer: Which test color should I use? (Blue · Green)",
+  "block": {
+    "questions": [
+      {
+        "question": "Which test color should I use?",
+        "options": [
+          { "label": "Blue", "description": "Use blue." },
+          { "label": "Green", "description": "Use green." }
+        ]
+      }
+    ]
+  }
+}

@@ -4,7 +4,19 @@ import { ACPAttach } from "./acp-attach.js";
 import { SessionRegistry } from "./registry.js";
 
 interface Managed { signature: string; attach: ACPAttach }
-export interface HarnessDiscoveryStatus { harness_type: string; discovered_sessions: number; attached_sessions: number }
+export interface HarnessDiscoveryStatus {
+  harness_type: string;
+  discovered_sessions: number;
+  attached_sessions: number;
+  version?: string;
+  capabilities?: {
+    discovery: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
+    transcript: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
+    messaging: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
+    question_response: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
+    approval_response: { supported: boolean; mode: "read_only" | "read_write" | "unsupported"; reason?: string };
+  };
+}
 
 export class SessionManager {
   readonly registry: SessionRegistry;

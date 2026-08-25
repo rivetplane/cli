@@ -13,6 +13,14 @@ npx rivetplane
 
 The login command uses `https://rivetplane.com`, opens Rivetplane in your browser, and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, OpenCode export discovery, the local API, and the outbound relay. Keep it running while you use Rivetplane. Use `--server` only for a self-hosted control plane.
 
+## Existing Claude Code sessions
+
+Rivetplane discovers active Claude Code sessions machine-wide with `claude agents --json`. The command does not depend on Rivetplane's current directory. Rivetplane tails the matching files under `~/.claude/projects`, keeps bounded checkpoints, and excludes Claude subagents and sidechains from the top-level session list.
+
+Discovery and transcript relay are read-only. Claude Code does not document a local exact-ID command or SDK method that can send a message or answer a pending question or approval in an arbitrary active session. Rivetplane does not use the private `/tmp/cc-socks` wire protocol and returns a clear error for these control requests. The health response reports discovery, transcript, messaging, question response, and approval response separately.
+
+Use `--no-claude-code` to turn off this adapter. `--claude-executable`, `--claude-config-dir`, and `--claude-checkpoint` override its executable, local state directory, and checkpoint file.
+
 ## Existing OpenCode sessions
 
 When `opencode` is on `PATH`, Rivetplane first runs `opencode debug scrap`, the supported OpenCode command that lists known projects. It uses the configured OpenCode directory as a seed, scans each accessible project worktree, and includes the global project bucket. It runs `opencode session list --format json --max-count 200` in each scope and combines the results by session ID. This immediate startup scan builds the machine session index. Rivetplane caches that index and refreshes it every 60 seconds by default. The 2-second transcript poll does not repeat project discovery or database pages.
