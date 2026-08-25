@@ -234,6 +234,8 @@ test("caches thousands of indexed sessions across repeated transcript polls", as
     for (let poll = 0; poll < 5; poll++) { now += 2_000; await manager.poll(); }
     assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 16); assert.equal(registry.list().length, 0);
     assert.deepEqual(manager.harnesses(), [{ harness_type: "opencode", discovered_sessions: 2_501, attached_sessions: 0 }]);
+    assert.deepEqual({ harness_type: manager.capabilities()?.harness_type, can_create_session: manager.capabilities()?.can_create_session, transport: manager.capabilities()?.transport }, { harness_type: "opencode", can_create_session: false, transport: "opencode-cli-export" });
+    assert.equal(manager.capabilities()?.session_capabilities?.discovery.mode, "read_only");
     assert.equal(logs.some((message) => message.includes("index refresh completed in") && message.includes("2501 cached sessions")), true);
     assert.equal(logs.some((message) => message.includes("16 active, recent, or probe candidates") && message.includes("selected 16") && message.includes("exporting 4")), true);
     assert.equal(logs.some((message) => message.includes("0 active, recent, or probe candidates") && message.includes("exporting 0")), true); manager.stop();

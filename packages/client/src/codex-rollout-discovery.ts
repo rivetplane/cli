@@ -4,6 +4,7 @@ import { access, mkdir, open, readFile, readdir, rename, stat, writeFile } from 
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Session, TranscriptEventPayloadMap, TranscriptEventType } from "@rivetplane/shared/model";
+import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
@@ -123,6 +124,11 @@ export class CodexRolloutDiscovery {
   stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
   target(id: string): CommandTarget | undefined { return this.#present.has(id) && this.registry.get(id)?.read_only !== false ? new ReadOnlyCodexTarget() : undefined; }
   harnesses(): HarnessDiscoveryStatus[] { return this.#available ? [{ harness_type: "codex", discovered_sessions: this.#present.size, attached_sessions: 0, capabilities: this.health() }] : []; }
+  capabilities(): HarnessCapabilities | undefined {
+    if (!this.#available) return undefined;
+    const reason = "Codex rollout files are read-only; use 'rivetplane codex' for a managed app-server session";
+    return { machine_id: this.machine_id, harness_type: "codex", can_create_session: false, directories: [], models: [], reported_at: new Date().toISOString(), transport: "codex-rollout-jsonl", session_capabilities: this.health(), limitations: [reason] };
+  }
   health() {
     const unsupported = (reason: string) => ({ supported: false, mode: "unsupported" as const, reason });
     const readOnly = { supported: this.#available, mode: "read_only" as const, ...(!this.#available ? { reason: "The Codex sessions directory is not readable." } : {}) };
