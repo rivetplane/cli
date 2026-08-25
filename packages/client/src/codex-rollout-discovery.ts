@@ -34,6 +34,10 @@ export interface CodexRolloutDiscoveryOptions {
 
 function object(value: unknown): RecordValue | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined; }
 function string(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
+function missingDirectory(error: unknown): boolean {
+  const code = object(error)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
 function timestamp(value: unknown, fallback = Date.now()): string { const date = new Date(typeof value === "string" || typeof value === "number" ? value : fallback); return Number.isNaN(date.valueOf()) ? new Date(fallback).toISOString() : date.toISOString(); }
 function stableId(sessionId: string, value: unknown): string { return `codex-${createHash("sha256").update(sessionId).update("\0").update(JSON.stringify(value)).digest("hex").slice(0, 32)}`; }
 function boundedText(value: unknown, maxBytes: number): string {
@@ -115,6 +119,7 @@ export class CodexRolloutDiscovery {
   #files: string[] = [];
   #nextScanAt = 0;
   #fileFailures = new Map<string, { attempts: number; next_attempt_at: number }>();
+  #lastDiscoveryError: string | undefined;
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: CodexRolloutDiscoveryOptions = {}) {
     this.sessions_directory = options.sessions_directory ?? join(homedir(), ".codex", "sessions");
@@ -140,7 +145,7 @@ export class CodexRolloutDiscovery {
     if (this.#polling) return; this.#polling = true;
     try {
       await this.#load();
-      await access(this.sessions_directory, constants.R_OK); this.#available = true;
+      await access(this.sessions_directory, constants.R_OK); this.#available = true; this.#lastDiscoveryError = undefined;
       const now = this.options.now?.() ?? Date.now();
       if (now >= this.#nextScanAt) {
         const cutoff = now - (this.options.recent_window_ms ?? 24 * 60 * 60_000); const limit = Math.max(1, this.options.max_sessions ?? 48);
@@ -161,7 +166,17 @@ export class CodexRolloutDiscovery {
       });
       for (const id of this.#present) if (!seen.has(id) && this.registry.get(id)?.read_only !== false) this.registry.remove(id);
       this.#present = seen; await this.#save();
-    } catch (error) { this.#available = false; this.registry.emit("warning", new Error(`Codex rollout discovery failed: ${error instanceof Error ? error.message : String(error)}`)); }
+    } catch (error) {
+      this.#available = false;
+      for (const id of this.#present) if (this.registry.get(id)?.read_only !== false) this.registry.remove(id);
+      this.#present.clear(); this.#files = []; this.#nextScanAt = 0;
+      if (missingDirectory(error)) this.#lastDiscoveryError = undefined;
+      else {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message !== this.#lastDiscoveryError) this.registry.emit("warning", new Error(`Codex rollout discovery failed: ${message}`));
+        this.#lastDiscoveryError = message;
+      }
+    }
     finally { this.#polling = false; }
   }
 
