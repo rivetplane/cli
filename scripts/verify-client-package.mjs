@@ -75,7 +75,9 @@ try {
   const installedCliPath = join(installDirectory, "node_modules", "rivetplane", "dist", "cli.js");
   const installedCli = await readFile(installedCliPath, "utf8");
   assert(installedCli.startsWith("#!/usr/bin/env node\n"), "installed CLI has no Node shebang");
-  assert.match(run(binary, ["--help"], { cwd: installDirectory }), /Usage:\s+rivetplane/);
+  const help = run(binary, ["--help"], { cwd: installDirectory });
+  assert.match(help, /Usage:\s+rivetplane/);
+  assert.match(help, /rivetplane opencode/, "installed CLI does not document the managed OpenCode command");
   assert.equal(run(binary, ["--version"], { cwd: installDirectory }), packageJson.version);
   assert.match(run("npx", ["--yes", "--package", tarball, "rivetplane", "--help"], { cwd: npxDirectory }), /Usage:\s+rivetplane/);
 

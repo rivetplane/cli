@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { hostname } from "node:os";
 import { createRequire } from "node:module";
+import { spawn, type ChildProcess } from "node:child_process";
 import { HarnessControlClient } from "./client.js";
 import { login, readCredentials, resolveServerUrl, writeCredentials } from "./credentials.js";
 
@@ -11,13 +12,15 @@ const HELP = `Rivetplane local client
 
 Usage:
   rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-url URL] [--opencode-directory PATH] [--no-opencode] [--no-relay]
+  rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
   rivetplane --help
 
 The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, starts a
 loopback-only OpenCode server when OpenCode is installed, and exposes the local API at
-http://127.0.0.1:PORT/v1. Login uses https://rivetplane.com unless --server or
-HARNESS_CP_SERVER selects a self-hosted control plane.`;
+http://127.0.0.1:PORT/v1. The opencode command also opens a TUI attached to that
+managed server. Login uses https://rivetplane.com unless --server or HARNESS_CP_SERVER
+selects a self-hosted control plane.`;
 
 function flag(name: string): string | undefined { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }
 
@@ -37,6 +40,7 @@ async function main(): Promise<void> {
     process.stdout.write(`Paired machine ${credentials.machine_name} (${credentials.machine_id}).\n`); return;
   }
 
+  const attachOpenCode = process.argv[2] === "opencode";
   const credentials = await readCredentials();
   const discoveryDirectory = flag("--discovery-dir");
   const localPort = Number(flag("--local-port") ?? process.env.HARNESS_CP_LOCAL_PORT ?? 41737);
@@ -57,8 +61,29 @@ async function main(): Promise<void> {
   if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode: ${client.opencode ? `${client.opencode.url} for ${client.opencode.directory}` : "disabled"})\n`);
   else for (const harness of harnesses) process.stdout.write(`Harness: ${harness.harness_type} (${harness.attached_sessions}/${harness.discovered_sessions} sessions attached)\n`);
   let stopping = false;
-  const stop = (): void => { if (stopping) return; stopping = true; void client.stop().finally(() => process.exit(0)); };
+  let attachedProcess: ChildProcess | undefined;
+  const stop = (): void => {
+    if (stopping) return;
+    stopping = true;
+    attachedProcess?.kill("SIGTERM");
+    void client.stop().finally(() => process.exit(0));
+  };
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
+  if (attachOpenCode) {
+    if (!client.opencode || client.opencode.url === "automatic") throw new Error("OpenCode is not available for an attached TUI");
+    const separator = process.argv.indexOf("--");
+    const attachOptions = separator >= 0 ? process.argv.slice(separator + 1) : [];
+    attachedProcess = spawn("opencode", ["attach", client.opencode.url, ...attachOptions], {
+      cwd: client.opencode.directory,
+      stdio: "inherit",
+    });
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      attachedProcess?.once("error", reject);
+      attachedProcess?.once("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+    });
+    await client.stop();
+    process.exitCode = exitCode;
+  }
 }
 
 void main().catch((error) => { process.stderr.write(`rivetplane: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
