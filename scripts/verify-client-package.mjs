@@ -3,7 +3,9 @@ import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
+import spawn from "cross-spawn";
+
+const spawnSync = spawn.sync;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const client = join(root, "packages", "client");
