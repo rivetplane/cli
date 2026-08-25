@@ -32,11 +32,11 @@ test("combines two project scopes and the global bucket when started from anothe
   const root = await mkdtemp(join(tmpdir(), "rivetplane-opencode-projects-")); const projectA = join(root, "project-a"); const projectB = join(root, "project-b"); const globalBucket = join(root, "global");
   await Promise.all([mkdir(projectA), mkdir(projectB), mkdir(globalBucket)]); const questionExport = await fixture("export-question-running.json"); const listCalls: Array<{ cwd: string; args: readonly string[] }> = [];
   const projects = [{ id: "a", worktree: projectA, sandboxes: [] }, { id: "b", worktree: projectB, sandboxes: [] }, { id: "global", worktree: globalBucket, sandboxes: [] }];
-  const scopedFixture = async (name: string, marker: string, directory: string): Promise<unknown[]> => JSON.parse((await fixture(name)).replaceAll(marker, directory)) as unknown[];
+  const scopedFixture = async (name: string, directory: string): Promise<unknown[]> => (JSON.parse(await fixture(name)) as Array<Record<string, unknown>>).map((session) => ({ ...session, directory }));
   const sessionsByDirectory: Record<string, unknown[]> = {
-    [projectA]: await scopedFixture("session-list-project-a.json", "__PROJECT_A__", projectA),
-    [projectB]: await scopedFixture("session-list-project-b.json", "__PROJECT_B__", projectB),
-    [globalBucket]: await scopedFixture("session-list-global.json", "__GLOBAL__", globalBucket),
+    [projectA]: await scopedFixture("session-list-project-a.json", projectA),
+    [projectB]: await scopedFixture("session-list-project-b.json", projectB),
+    [globalBucket]: await scopedFixture("session-list-global.json", globalBucket),
   };
   const runner: CommandRunner = async (_program, args, options) => {
     if (args[0] === "debug") return { stdout: JSON.stringify(projects), stderr: "" };
