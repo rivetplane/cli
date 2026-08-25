@@ -56,6 +56,11 @@ export interface ClaudeCodeDiscoveryOptions {
   max_lines_per_poll?: number;
   max_project_directories?: number;
   max_recent_ids?: number;
+  max_sessions?: number;
+  concurrency?: number;
+  retry_base_ms?: number;
+  max_retry_ms?: number;
+  now?: () => number;
   runner?: CommandRunner;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
@@ -77,6 +82,16 @@ function hash(value: string): string { return createHash("sha256").update(value)
 function stableId(...parts: string[]): string { return `claude-jsonl:${hash(parts.join("\0"))}`; }
 function jsonValue(value: unknown): JsonValue | undefined { try { return JSON.parse(JSON.stringify(value)) as JsonValue; } catch { return undefined; } }
 function summary(value: unknown, limit = 500): string { const text = typeof value === "string" ? value : JSON.stringify(value) ?? ""; return text.length > limit ? `${text.slice(0, limit)}…` : text; }
+function agentTime(agent: ClaudeAgent): number {
+  if (typeof agent.startedAt === "number") return agent.startedAt < 10_000_000_000 ? agent.startedAt * 1_000 : agent.startedAt;
+  return typeof agent.startedAt === "string" ? Date.parse(agent.startedAt) || 0 : 0;
+}
+async function mapLimit<T>(values: readonly T[], concurrency: number, operation: (value: T) => Promise<void>): Promise<void> {
+  let index = 0;
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, async () => {
+    while (index < values.length) { const value = values[index++]; if (value !== undefined) await operation(value); }
+  }));
+}
 
 export function parseClaudeAgents(stdout: string): ClaudeAgent[] {
   let parsed: unknown;
@@ -168,6 +183,9 @@ export class ClaudeCodeDiscovery {
   #checkpoints: CheckpointFile = { version: 1, sessions: {} };
   #pathCache = new Map<string, string>();
   #diagnostics = new Set<string>();
+  #pollFailures = 0;
+  #nextPollAt = 0;
+  #syncFailures = new Map<string, { attempts: number; next_attempt_at: number }>();
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: ClaudeCodeDiscoveryOptions = {}) {
     this.directory = options.directory ?? process.cwd();
@@ -179,14 +197,15 @@ export class ClaudeCodeDiscovery {
   stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
   target(id: string): CommandTarget | undefined { return this.#present.has(id) ? new ReadOnlyClaudeTarget() : undefined; }
   get executable(): string | undefined { return this.#executable; }
-  harnesses(): HarnessDiscoveryStatus[] { return this.#executable ? [{ harness_type: "claude-code", discovered_sessions: this.#present.size, attached_sessions: this.#present.size, ...(this.#version ? { version: this.#version } : {}), capabilities: sessionCapabilities() }] : []; }
+  harnesses(): HarnessDiscoveryStatus[] { return this.#executable ? [{ harness_type: "claude-code", discovered_sessions: this.#present.size, attached_sessions: this.registry.list().filter((session) => session.harness_type === "claude-code").length, ...(this.#version ? { version: this.#version } : {}), capabilities: sessionCapabilities() }] : []; }
   capabilities(): HarnessCapabilities | undefined {
     if (!this.#executable) return undefined;
     return { machine_id: this.machine_id, harness_type: "claude-code", can_create_session: false, directories: [], models: [], reported_at: new Date().toISOString(), session_capabilities: sessionCapabilities(), ...(this.#version ? { harness_version: this.#version } : {}) };
   }
 
   async poll(): Promise<void> {
-    if (this.#polling) return; this.#polling = true;
+    const now = this.options.now?.() ?? Date.now();
+    if (this.#polling || now < this.#nextPollAt) return; this.#polling = true;
     try {
       await this.#load(); this.#executable ??= await resolveClaudeExecutable(this.options);
       if (!this.#executable) { this.#diagnostic("Claude Code executable was not found; existing-session discovery is inactive"); return; }
@@ -196,12 +215,30 @@ export class ClaudeCodeDiscovery {
       }
       const result = await this.#command(runner, [...(this.options.executable_args ?? []), "agents", "--json"], common);
       const agents = parseClaudeAgents(result.stdout).filter((agent) => agent.kind !== "subagent" && agent.kind !== "sidechain");
+      this.#pollFailures = 0; this.#nextPollAt = 0;
       const found = new Set(agents.map((agent) => agent.sessionId));
-      for (const id of this.#present) if (!found.has(id)) { const prior = this.registry.get(id); if (prior) { this.registry.setPending(id, null); this.registry.setStatus(id, "completed", "Claude Code process is no longer active; persisted transcript remains available"); } }
+      for (const id of this.#present) if (!found.has(id)) {
+        this.registry.remove(id); this.#pathCache.delete(id); this.#syncFailures.delete(id);
+      }
       this.#present = found;
-      for (const agent of agents) await this.#sync(agent);
+      const limit = Math.max(1, this.options.max_sessions ?? 128);
+      const selected = [...agents].sort((left, right) => agentTime(right) - agentTime(left)).slice(0, limit);
+      if (agents.length > limit) this.#diagnostic(`Claude Code reports ${agents.length} active sessions; relaying the newest ${limit}`);
+      await mapLimit(selected, this.options.concurrency ?? 2, async (agent) => {
+        const retry = this.#syncFailures.get(agent.sessionId); const current = this.options.now?.() ?? Date.now();
+        if (retry && current < retry.next_attempt_at) return;
+        try { await this.#sync(agent); this.#syncFailures.delete(agent.sessionId); }
+        catch (error) {
+          const attempts = (retry?.attempts ?? 0) + 1; const delay = this.#retryDelay(attempts);
+          this.#syncFailures.set(agent.sessionId, { attempts, next_attempt_at: current + delay });
+          this.registry.emit("warning", new Error(`Claude Code session ${agent.sessionId} sync failed; retrying in ${Math.ceil(delay / 1_000)}s: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      });
       await this.#save();
-    } catch (error) { this.registry.emit("warning", new Error(`Claude Code discovery failed: ${error instanceof Error ? error.message : String(error)}`)); }
+    } catch (error) {
+      const now = this.options.now?.() ?? Date.now(); const delay = this.#retryDelay(++this.#pollFailures); this.#nextPollAt = now + delay;
+      this.registry.emit("warning", new Error(`Claude Code discovery failed; retrying in ${Math.ceil(delay / 1_000)}s: ${error instanceof Error ? error.message : String(error)}`));
+    }
     finally { this.#polling = false; }
   }
 
@@ -325,5 +362,6 @@ export class ClaudeCodeDiscovery {
     await mkdir(dirname(this.checkpoint_path), { recursive: true, mode: 0o700 }); const temporary = `${this.checkpoint_path}.${process.pid}.tmp`;
     await writeFile(temporary, `${JSON.stringify(this.#checkpoints)}\n`, { mode: 0o600 }); await rename(temporary, this.checkpoint_path);
   }
+  #retryDelay(attempts: number): number { return Math.min(this.options.max_retry_ms ?? 5 * 60_000, (this.options.retry_base_ms ?? 30_000) * 2 ** Math.max(0, attempts - 1)); }
   #diagnostic(message: string): void { if (this.#diagnostics.has(message)) return; this.#diagnostics.add(message); this.registry.emit("log", message); }
 }

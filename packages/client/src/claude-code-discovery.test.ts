@@ -37,7 +37,9 @@ test("discovers outside the client cwd, hides subagents, tails once, and reports
     assert.deepEqual(registry.transcript(sessionId).map((event) => event.type), ["user_message", "agent_message", "tool_call"]);
     await manager.poll(); assert.equal(registry.transcript(sessionId).length, 3);
     const health = manager.harnesses()[0]; assert.equal(health?.capabilities?.discovery.supported, true); assert.equal(health?.capabilities?.messaging.supported, false); assert.match(health?.capabilities?.messaging.reason ?? "", /cc-socks/);
-    agents = []; await manager.poll(); assert.equal(registry.get(sessionId)?.status, "completed"); assert.equal(registry.transcript(sessionId).length, 4); assert.equal(registry.get(sessionId)?.pending, null); manager.stop();
+    let removed: string | undefined; registry.on("removed", (id: string) => { removed = id; });
+    agents = []; await manager.poll(); assert.equal(removed, sessionId); assert.equal(registry.get(sessionId), undefined); assert.equal(manager.harnesses()[0]?.attached_sessions, 0);
+    const checkpoint = JSON.parse(await readFile(join(env.root, "checkpoint.json"), "utf8")) as { sessions: Record<string, unknown> }; assert.ok(checkpoint.sessions[sessionId]); manager.stop();
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });
 
@@ -86,5 +88,19 @@ test("runs discovery through a fake Claude process", async () => {
   try {
     const registry = new SessionRegistry(); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, executable_args: [fake, agentsPath], config_dir: env.config, checkpoint_path: join(env.root, "cp.json"), timeout_ms: 2_000 });
     await manager.poll(); assert.equal(registry.get(sessionId)?.pending?.id, "toolu_exact_question"); manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
+test("bounds active-session sync and backs off failed discovery polls", async () => {
+  const env = await setup(); let now = 1_000; let calls = 0; let fail = false;
+  const agents = Array.from({ length: 4 }, (_, index): ClaudeAgent => ({ sessionId: `${index}`.padStart(8, "0") + "-2222-4333-8444-555555555555", cwd: env.root, kind: "interactive", startedAt: index }));
+  const boundedRunner: NonNullable<ClaudeCodeDiscoveryOptions["runner"]> = async (_program, args) => {
+    if (args.includes("--version")) return { stdout: "2.1.245\n", stderr: "" };
+    calls++; if (fail) throw new Error("temporary failure"); return { stdout: JSON.stringify(agents), stderr: "" };
+  };
+  try {
+    const registry = new SessionRegistry(); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "bounded.json"), runner: boundedRunner, max_sessions: 2, now: () => now, retry_base_ms: 100 });
+    await manager.poll(); assert.equal(registry.list().length, 2); assert.equal(manager.harnesses()[0]?.discovered_sessions, 4); assert.equal(manager.harnesses()[0]?.attached_sessions, 2);
+    fail = true; await manager.poll(); assert.equal(calls, 2); await manager.poll(); assert.equal(calls, 2); now += 100; await manager.poll(); assert.equal(calls, 3); manager.stop();
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });
