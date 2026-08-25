@@ -6,7 +6,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { browserLaunch, login } from "./credentials.js";
+import { browserLaunch, login, resolveServerUrl } from "./credentials.js";
+
+test("uses Rivetplane by default and preserves self-hosted overrides", () => {
+  assert.equal(resolveServerUrl(), "https://rivetplane.com");
+  assert.equal(resolveServerUrl(undefined, "https://self-hosted.example"), "https://self-hosted.example");
+  assert.equal(resolveServerUrl("https://explicit.example", "https://environment.example"), "https://explicit.example");
+});
 
 test("opens the complete authorization URL on Windows without cmd parsing", () => {
   const url = "https://control.example/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A51959%2Fcallback&state=state-value&code_challenge=challenge&device_id=device";
