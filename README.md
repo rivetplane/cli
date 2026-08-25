@@ -8,10 +8,10 @@ Node.js 22 or later is required. Rivetplane tests and publishes releases on Node
 
 ```sh
 npx rivetplane login
-npx rivetplane opencode
+npx rivetplane
 ```
 
-The login command uses `https://rivetplane.com`, opens Rivetplane in your browser, and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, the local API, and the outbound relay. Keep it running while you use Rivetplane. Use `--server` only for a self-hosted control plane.
+The login command uses `https://rivetplane.com`, opens Rivetplane in your browser, and stores a machine-scoped token in your user configuration directory. In an interactive terminal, the second command starts ACP discovery, the local API, the outbound relay, and an OpenCode TUI attached to Rivetplane's managed server. Keep it running while you use Rivetplane. Use `--no-opencode-tui` for background-only relay mode and `--server` only for a self-hosted control plane.
 
 If OpenCode is installed, the client prints its local server URL. Open an interactive TUI against the managed server with the command it prints:
 
