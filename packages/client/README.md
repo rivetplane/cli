@@ -1,6 +1,6 @@
 # Rivetplane CLI
 
-Rivetplane connects local ACP-compatible and OpenCode agent sessions to a remote control plane. The client starts all remote connections. It does not open an inbound network port.
+Rivetplane connects local ACP-compatible and OpenCode agent sessions to a remote control plane. The client starts all remote connections. It does not open an internet-facing port. When OpenCode is installed, Rivetplane starts a loopback-only OpenCode server on an available port and manages its lifetime.
 
 ## Use the client
 
@@ -12,6 +12,8 @@ npx rivetplane
 ```
 
 The login command uses `https://rivetplane.com`, opens the control plane in your browser, and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, the local API, and the outbound relay. Keep it running while you use the control plane. Use `--server` only for a self-hosted control plane.
+
+If OpenCode is installed, the client prints its local server URL and an `opencode attach` command. Use the attached TUI so Rivetplane can relay its live messages, approvals, and questions. An independent `opencode` process uses a separate internal runtime.
 
 Run `npx rivetplane --help` for all options.
 

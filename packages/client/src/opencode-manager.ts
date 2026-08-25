@@ -1,4 +1,6 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2/client";
+import { createOpencodeServer } from "@opencode-ai/sdk/v2/server";
+import { createServer } from "node:net";
 import type { Part, PermissionRequest, QuestionRequest, Session as OpenCodeSession, SessionStatus as OpenCodeSessionStatus } from "@opencode-ai/sdk/v2/client";
 import type { ApprovalScope, SessionStatus } from "@rivetplane/shared/model";
 import type { CreateSessionCommand, HarnessCapabilities } from "@rivetplane/shared/protocol";
@@ -26,17 +28,36 @@ function mapStatus(status: OpenCodeSessionStatus | undefined): SessionStatus {
   return "error";
 }
 
+async function availableLoopbackPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => resolve());
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("Could not allocate an OpenCode port");
+  }
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return address.port;
+}
+
 export interface OpenCodeManagerOptions {
   url?: string;
   directory?: string;
   interval_ms?: number;
   client?: OpencodeClient;
+  server_factory?: typeof createOpencodeServer;
+  port_factory?: () => Promise<number>;
 }
 
 export class OpenCodeManager {
-  readonly url: string;
   readonly directory: string;
-  #client: OpencodeClient;
+  #url: string | undefined;
+  #client: OpencodeClient | undefined;
+  #server: Awaited<ReturnType<typeof createOpencodeServer>> | undefined;
+  #nextLaunchAttempt = 0;
   #timer: NodeJS.Timeout | undefined;
   #polling = false;
   #online = false;
@@ -48,10 +69,12 @@ export class OpenCodeManager {
   #capabilitiesAt = 0;
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: OpenCodeManagerOptions = {}) {
-    this.url = options.url ?? "http://localhost:4096";
+    this.#url = options.url;
     this.directory = options.directory ?? process.cwd();
-    this.#client = options.client ?? createOpencodeClient({ baseUrl: this.url });
+    this.#client = options.client ?? (options.url ? createOpencodeClient({ baseUrl: options.url }) : undefined);
   }
+
+  get url(): string { return this.#url ?? "automatic"; }
 
   async start(): Promise<void> {
     await this.poll();
@@ -59,7 +82,13 @@ export class OpenCodeManager {
     this.#timer.unref();
   }
 
-  stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
+  stop(): void {
+    if (this.#timer) clearInterval(this.#timer);
+    this.#timer = undefined;
+    this.#server?.close();
+    this.#server = undefined;
+    if (!this.options.url && !this.options.client) { this.#client = undefined; this.#url = undefined; }
+  }
   target(id: string): CommandTarget | undefined { return this.#sessions.has(id) ? new OpenCodeTarget(this, id) : undefined; }
   harnesses(): HarnessDiscoveryStatus[] {
     return this.#online ? [{ harness_type: "opencode", discovered_sessions: this.#sessions.size, attached_sessions: this.#sessions.size }] : [];
@@ -67,11 +96,12 @@ export class OpenCodeManager {
   capabilities(): HarnessCapabilities | undefined { return this.#capabilities ? structuredClone(this.#capabilities) : undefined; }
 
   async createSession(command: CreateSessionCommand): Promise<string> {
+    const client = this.#requireClient();
     const capabilities = this.#capabilities;
     if (!capabilities?.can_create_session) throw new Error("OpenCode session creation is not available");
     if (command.cwd !== this.directory) throw new Error("cwd is outside this OpenCode client scope");
     if (!capabilities.models.some((model) => model.provider_id === command.model.provider_id && model.model_id === command.model.model_id)) throw new Error("Model is not in the OpenCode roster");
-    const session = unwrap(await this.#client.session.create({ directory: command.cwd, ...(command.title ? { title: command.title } : {}),
+    const session = unwrap(await client.session.create({ directory: command.cwd, ...(command.title ? { title: command.title } : {}),
       model: { providerID: command.model.provider_id, id: command.model.model_id } }), "session create");
     await this.#syncSession(session, { type: "idle" });
     return session.id;
@@ -81,15 +111,17 @@ export class OpenCodeManager {
     if (this.#polling) return;
     this.#polling = true;
     try {
-      unwrap(await this.#client.global.health(), "health check");
+      const client = await this.#ensureClient();
+      if (!client) return;
+      unwrap(await client.global.health(), "health check");
       if (!this.#online) this.registry.emit("log", `OpenCode server found: ${this.url}`);
       this.#online = true; this.#lastError = "";
       if (!this.#capabilities || Date.now() - this.#capabilitiesAt > 60_000) await this.#refreshCapabilities();
       const [sessions, statuses, permissions, questions] = await Promise.all([
-        this.#client.session.list({ directory: this.directory }).then((result) => unwrap(result, "session list")),
-        this.#client.session.status({ directory: this.directory }).then((result) => unwrap(result, "session status")),
-        this.#client.permission.list({ directory: this.directory }).then((result) => unwrap(result, "permission list")),
-        this.#client.question.list({ directory: this.directory }).then((result) => unwrap(result, "question list")),
+        client.session.list({ directory: this.directory }).then((result) => unwrap(result, "session list")),
+        client.session.status({ directory: this.directory }).then((result) => unwrap(result, "session status")),
+        client.permission.list({ directory: this.directory }).then((result) => unwrap(result, "permission list")),
+        client.question.list({ directory: this.directory }).then((result) => unwrap(result, "question list")),
       ]);
       const active = new Set(sessions.map((session) => session.id));
       for (const id of this.#sessions.keys()) if (!active.has(id)) this.#sessions.delete(id);
@@ -100,11 +132,18 @@ export class OpenCodeManager {
       const message = error instanceof Error ? error.message : String(error);
       if (this.#lastError !== message && this.#sessions.size > 0) this.registry.emit("warning", new Error(message));
       this.#lastError = message;
+      if (this.#server && !this.options.url && !this.options.client) {
+        this.#server.close();
+        this.#server = undefined;
+        this.#client = undefined;
+        this.#url = undefined;
+        this.#nextLaunchAttempt = Date.now() + 2_000;
+      }
     } finally { this.#polling = false; }
   }
 
   async #refreshCapabilities(): Promise<void> {
-    const roster = unwrap(await this.#client.provider.list({ directory: this.directory }), "provider list");
+    const roster = unwrap(await this.#requireClient().provider.list({ directory: this.directory }), "provider list");
     const connected = new Set(roster.connected);
     const models = roster.all.filter((provider) => connected.has(provider.id)).flatMap((provider) => Object.values(provider.models).map((model) => ({
       provider_id: provider.id, model_id: model.id, name: `${provider.name} — ${model.name}`, status: model.status,
@@ -118,13 +157,13 @@ export class OpenCodeManager {
   async sendMessage(id: string, text: string): Promise<void> {
     const session = this.#require(id);
     this.registry.setStatus(id, "running");
-    const result = await this.#client.session.promptAsync({ sessionID: id, directory: session.directory, parts: [{ type: "text", text }] });
+    const result = await this.#requireClient().session.promptAsync({ sessionID: id, directory: session.directory, parts: [{ type: "text", text }] });
     if (result.error) throw new Error(`OpenCode send message failed: ${result.error instanceof Error ? result.error.message : JSON.stringify(result.error)}`);
   }
 
   async interrupt(id: string): Promise<void> {
     const session = this.#require(id);
-    unwrap(await this.#client.session.abort({ sessionID: id, directory: session.directory }), "interrupt");
+    unwrap(await this.#requireClient().session.abort({ sessionID: id, directory: session.directory }), "interrupt");
     this.registry.setStatus(id, "waiting_input");
   }
 
@@ -133,13 +172,13 @@ export class OpenCodeManager {
     if (!pending || pending.id !== pendingId) throw new Error(`Pending interaction ${pendingId} is no longer active`);
     if (pending.type === "approval") {
       const reply = response === "deny" ? "reject" : scope === "once" || !scope ? "once" : "always";
-      unwrap(await this.#client.permission.reply({ requestID: pendingId, directory: session.directory, reply }), "permission reply");
+      unwrap(await this.#requireClient().permission.reply({ requestID: pendingId, directory: session.directory, reply }), "permission reply");
       this.registry.append(id, "permission_response", { approval_id: pendingId, resolution: response === "deny" ? "deny" : "approve", ...(scope ? { scope } : {}) });
     } else {
       const request = this.#questions.get(pendingId);
       if (!request) throw new Error(`Question ${pendingId} is no longer active`);
       const answers = request.questions.map((_, index) => index === 0 ? [response] : []);
-      unwrap(await this.#client.question.reply({ requestID: pendingId, directory: session.directory, answers }), "question reply");
+      unwrap(await this.#requireClient().question.reply({ requestID: pendingId, directory: session.directory, answers }), "question reply");
       this.#questions.delete(pendingId);
     }
     this.registry.setPending(id, null); this.registry.setStatus(id, "running");
@@ -154,7 +193,7 @@ export class OpenCodeManager {
       created_at: iso(session.time.created), last_activity_at: iso(session.time.updated), pending: current?.pending ?? null,
     });
     if (first) this.registry.emit("log", `Harness attached: opencode (${session.id})`);
-    const messages = unwrap(await this.#client.session.messages({ sessionID: session.id, directory: session.directory }), `messages for ${session.id}`);
+    const messages = unwrap(await this.#requireClient().session.messages({ sessionID: session.id, directory: session.directory }), `messages for ${session.id}`);
     for (const message of messages) this.#syncParts(session.id, message.info.role, message.parts);
   }
 
@@ -205,6 +244,32 @@ export class OpenCodeManager {
   }
 
   #require(id: string): OpenCodeSession { const session = this.#sessions.get(id); if (!session) throw new Error(`OpenCode session is not attached: ${id}`); return session; }
+
+  #requireClient(): OpencodeClient {
+    if (!this.#client) throw new Error("OpenCode server is not available");
+    return this.#client;
+  }
+
+  async #ensureClient(): Promise<OpencodeClient | undefined> {
+    if (this.#client) return this.#client;
+    if (Date.now() < this.#nextLaunchAttempt) return undefined;
+    this.#nextLaunchAttempt = Date.now() + 30_000;
+    try {
+      const launch = this.options.server_factory ?? createOpencodeServer;
+      const port = await (this.options.port_factory ?? availableLoopbackPort)();
+      this.#server = await launch({ hostname: "127.0.0.1", port, timeout: 10_000 });
+      this.#url = this.#server.url;
+      this.#client = createOpencodeClient({ baseUrl: this.#url });
+      this.registry.emit("log", `OpenCode available; started loopback server: ${this.#url}`);
+      this.registry.emit("log", `OpenCode TUI: opencode attach ${this.#url}`);
+      return this.#client;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.#lastError !== message) this.registry.emit("log", `OpenCode is not available for automatic startup: ${message}`);
+      this.#lastError = message;
+      return undefined;
+    }
+  }
 }
 
 class OpenCodeTarget implements CommandTarget {
