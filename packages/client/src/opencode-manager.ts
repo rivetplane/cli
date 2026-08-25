@@ -121,11 +121,13 @@ export class OpenCodeManager {
       if (!this.#online) this.registry.emit("log", `OpenCode server found: ${this.url}`);
       this.#online = true; this.#lastError = "";
       if (!this.#capabilities || Date.now() - this.#capabilitiesAt > 60_000) await this.#refreshCapabilities();
-      const [sessions, statuses, permissions, questions] = await Promise.all([
-        client.session.list({ directory: this.directory }).then((result) => unwrap(result, "session list")),
-        client.session.status({ directory: this.directory }).then((result) => unwrap(result, "session status")),
-        this.#listPermissions(client),
-        this.#listQuestions(client),
+      const [sessions, statuses] = await Promise.all([
+        client.session.list().then((result) => unwrap(result, "session list")),
+        client.session.status().then((result) => unwrap(result, "session status")),
+      ]);
+      const [permissions, questions] = await Promise.all([
+        this.#listPermissions(client, sessions),
+        this.#listQuestions(client, sessions),
       ]);
       const active = new Set(sessions.map((session) => session.id));
       for (const id of this.#sessions.keys()) if (!active.has(id)) this.#sessions.delete(id);
@@ -238,38 +240,40 @@ export class OpenCodeManager {
     this.#parts.set(key, part.state.status);
   }
 
-  async #listPermissions(client: OpencodeClient): Promise<PendingPermission[]> {
-    const [legacyResult, v2Result] = await Promise.all([
-      client.permission.list({ directory: this.directory }),
-      client.v2.permission.request.list({ location: { directory: this.directory } }),
+  async #listPermissions(client: OpencodeClient, sessions: OpenCodeSession[]): Promise<PendingPermission[]> {
+    const directories = [...new Set(sessions.map((session) => session.directory))];
+    const [legacyResults, v2Results] = await Promise.all([
+      Promise.all(directories.map((directory) => client.permission.list({ directory }))),
+      Promise.all(directories.map((directory) => client.v2.permission.request.list({ location: { directory } }))),
     ]);
-    if (legacyResult.error && v2Result.error) {
-      throw new Error(`OpenCode permission list failed for both APIs: legacy=${summary(legacyResult.error)}; v2=${summary(v2Result.error)}`);
+    if (sessions.length > 0 && legacyResults.every((result) => result.error) && v2Results.every((result) => result.error)) {
+      throw new Error("OpenCode permission list failed for both legacy and V2 APIs");
     }
     const permissions = new Map<string, PendingPermission>();
-    if (!legacyResult.error) {
-      for (const permission of legacyResult.data ?? []) permissions.set(permission.id, { ...permission, api: "legacy" });
+    for (const result of legacyResults) {
+      if (!result.error) for (const permission of result.data ?? []) permissions.set(permission.id, { ...permission, api: "legacy" });
     }
-    if (!v2Result.error) {
-      for (const permission of v2Result.data?.data ?? []) permissions.set(permission.id, { ...permission, api: "v2" });
+    for (const result of v2Results) {
+      if (!result.error) for (const permission of result.data?.data ?? []) permissions.set(permission.id, { ...permission, api: "v2" });
     }
     return [...permissions.values()];
   }
 
-  async #listQuestions(client: OpencodeClient): Promise<PendingQuestion[]> {
-    const [legacyResult, v2Result] = await Promise.all([
-      client.question.list({ directory: this.directory }),
-      client.v2.question.request.list({ location: { directory: this.directory } }),
+  async #listQuestions(client: OpencodeClient, sessions: OpenCodeSession[]): Promise<PendingQuestion[]> {
+    const directories = [...new Set(sessions.map((session) => session.directory))];
+    const [legacyResults, v2Results] = await Promise.all([
+      Promise.all(directories.map((directory) => client.question.list({ directory }))),
+      Promise.all(directories.map((directory) => client.v2.question.request.list({ location: { directory } }))),
     ]);
-    if (legacyResult.error && v2Result.error) {
-      throw new Error(`OpenCode question list failed for both APIs: legacy=${summary(legacyResult.error)}; v2=${summary(v2Result.error)}`);
+    if (sessions.length > 0 && legacyResults.every((result) => result.error) && v2Results.every((result) => result.error)) {
+      throw new Error("OpenCode question list failed for both legacy and V2 APIs");
     }
     const questions = new Map<string, PendingQuestion>();
-    if (!legacyResult.error) {
-      for (const question of legacyResult.data ?? []) questions.set(question.id, { ...question, api: "legacy" });
+    for (const result of legacyResults) {
+      if (!result.error) for (const question of result.data ?? []) questions.set(question.id, { ...question, api: "legacy" });
     }
-    if (!v2Result.error) {
-      for (const question of v2Result.data?.data ?? []) questions.set(question.id, { ...question, api: "v2" });
+    for (const result of v2Results) {
+      if (!result.error) for (const question of result.data?.data ?? []) questions.set(question.id, { ...question, api: "v2" });
     }
     return [...questions.values()];
   }
