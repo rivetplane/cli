@@ -8,6 +8,7 @@ import { OpenCodeManager } from "./opencode-manager.js";
 import { OpenCodeExportDiscovery } from "./opencode-export-discovery.js";
 import { CodexRolloutDiscovery } from "./codex-rollout-discovery.js";
 import { CodexAppServerManager } from "./codex-app-server.js";
+import { ClaudeCodeDiscovery } from "./claude-code-discovery.js";
 
 export interface ClientOptions {
   credentials?: Credentials;
@@ -33,6 +34,10 @@ export interface ClientOptions {
   codex_executable?: string;
   codex_sessions_directory?: string;
   codex_checkpoint_path?: string;
+  claude_code?: boolean;
+  claude_executable?: string;
+  claude_config_dir?: string;
+  claude_checkpoint_path?: string;
 }
 
 export class HarnessControlClient {
@@ -43,6 +48,7 @@ export class HarnessControlClient {
   readonly opencode_exports?: OpenCodeExportDiscovery;
   readonly codex_rollouts?: CodexRolloutDiscovery;
   readonly codex_app_server?: CodexAppServerManager;
+  readonly claude_code?: ClaudeCodeDiscovery;
 
   constructor(private readonly options: ClientOptions = {}) {
     const machineId = options.credentials?.machine_id ?? `local-${randomUUID()}`;
@@ -65,7 +71,11 @@ export class HarnessControlClient {
       managed: options.codex_managed ?? false, ...(options.codex_endpoint ? { endpoint: options.codex_endpoint } : {}), ...(options.codex_token ? { token: options.codex_token } : {}),
       ...(options.codex_directory ? { directory: options.codex_directory } : {}), ...(options.codex_executable ? { executable: options.codex_executable } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });
-    const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.codex_app_server?.target(id) ?? this.opencode_exports?.target(id) ?? this.codex_rollouts?.target(id);
+    if (options.claude_code !== false) this.claude_code = new ClaudeCodeDiscovery(machineId, this.manager.registry, {
+      ...(options.claude_executable ? { executable: options.claude_executable } : {}), ...(options.claude_config_dir ? { config_dir: options.claude_config_dir } : {}),
+      ...(options.claude_checkpoint_path ? { checkpoint_path: options.claude_checkpoint_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
+    });
+    const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.codex_app_server?.target(id) ?? this.opencode_exports?.target(id) ?? this.codex_rollouts?.target(id) ?? this.claude_code?.target(id);
     this.local_api = new LocalApi(this.manager.registry, { port: options.local_port ?? 41737, target,
       harnesses: () => this.harnesses(), discovery_directory: this.manager.discovery.directory });
     if (options.credentials && options.relay !== false) this.relay = new OutboundRelay(options.credentials, this.manager.registry, target, {
@@ -74,16 +84,16 @@ export class HarnessControlClient {
         if (command.harness_type === "codex" && this.codex_app_server) return this.codex_app_server.createSession(command);
         throw new Error("Harness cannot create sessions");
       },
-      capabilities: () => [this.opencode?.capabilities(), this.codex_app_server?.capabilities()].filter((value): value is NonNullable<typeof value> => Boolean(value)),
+      capabilities: () => [this.opencode?.capabilities(), this.codex_app_server?.capabilities(), this.claude_code?.capabilities()].filter((value): value is NonNullable<typeof value> => Boolean(value)),
     });
     this.manager.registry.on("warning", (error) => this.manager.registry.emit("log", `Warning: ${error instanceof Error ? error.message : String(error)}`));
   }
 
-  async start(): Promise<{ local_port: number }> { const local_port = await this.local_api.start(); await Promise.all([this.manager.start(), this.opencode?.start(), this.opencode_exports?.start(), this.codex_rollouts?.start(), this.codex_app_server?.start()]); this.relay?.start(); return { local_port }; }
-  async stop(): Promise<void> { this.relay?.stop(); this.opencode?.stop(); this.opencode_exports?.stop(); this.codex_rollouts?.stop(); await this.codex_app_server?.stop(); this.manager.stop(); await this.local_api.stop(); }
+  async start(): Promise<{ local_port: number }> { const local_port = await this.local_api.start(); await Promise.all([this.manager.start(), this.opencode?.start(), this.opencode_exports?.start(), this.claude_code?.start(), this.codex_rollouts?.start(), this.codex_app_server?.start()]); this.relay?.start(); return { local_port }; }
+  async stop(): Promise<void> { this.relay?.stop(); this.opencode?.stop(); this.opencode_exports?.stop(); this.claude_code?.stop(); this.codex_rollouts?.stop(); await this.codex_app_server?.stop(); this.manager.stop(); await this.local_api.stop(); }
   harnesses() {
     const result = new Map<string, ReturnType<SessionManager["harnesses"]>[number]>();
-    for (const item of [...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? [])]) {
+    for (const item of [...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.claude_code?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? [])]) {
       const prior = result.get(item.harness_type); result.set(item.harness_type, prior ? { ...prior, ...item, discovered_sessions: prior.discovered_sessions + item.discovered_sessions, attached_sessions: prior.attached_sessions + item.attached_sessions } : item);
     }
     return [...result.values()];

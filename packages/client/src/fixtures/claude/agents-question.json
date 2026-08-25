@@ -1,0 +1,22 @@
+[
+  {
+    "pid": 43210,
+    "id": "11111111",
+    "cwd": "/private/tmp/claude-project",
+    "kind": "background",
+    "startedAt": 1787672416098,
+    "sessionId": "11111111-2222-4333-8444-555555555555",
+    "name": "Disposable test",
+    "status": "waiting",
+    "waitingFor": "input needed",
+    "state": "blocked"
+  },
+  {
+    "pid": 43211,
+    "cwd": "/private/tmp/claude-project",
+    "kind": "subagent",
+    "startedAt": 1787672417000,
+    "sessionId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "name": "internal worker"
+  }
+]

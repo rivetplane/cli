@@ -8,7 +8,8 @@
     "cli",
     "control-plane",
     "opencode",
-    "codex"
+    "codex",
+    "claude-code"
   ],
   "license": "MIT",
   "homepage": "https://github.com/rivetplane/cli#readme",
