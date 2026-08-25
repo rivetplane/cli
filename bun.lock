@@ -12,7 +12,7 @@
     },
     "packages/client": {
       "name": "rivetplane",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "bin": {
         "rivetplane": "dist/cli.js",
       },
