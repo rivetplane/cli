@@ -23,6 +23,8 @@ test("discovers rollouts independent of cwd, deduplicates, checkpoints, and hand
   const registry = new SessionRegistry(); const discovery = new CodexRolloutDiscovery("machine-1", registry, { sessions_directory: join(root, "sessions"), checkpoint_path: checkpoint, now: () => Date.parse("2026-08-25T10:01:00Z") });
   try {
     await discovery.poll(); assert.equal(registry.get("019c-test-thread")?.cwd, "/tmp/disposable-repo"); assert.equal(registry.get("019c-test-thread")?.read_only, true);
+    assert.deepEqual({ harness_type: discovery.capabilities()?.harness_type, can_create_session: discovery.capabilities()?.can_create_session, transport: discovery.capabilities()?.transport }, { harness_type: "codex", can_create_session: false, transport: "codex-rollout-jsonl" });
+    assert.equal(discovery.capabilities()?.session_capabilities?.discovery.mode, "read_only");
     assert.equal(registry.get("019c-test-thread")?.metadata && (registry.get("019c-test-thread")!.metadata as Record<string, unknown>).live_process_attached, false);
     assert.deepEqual(registry.transcript("019c-test-thread").map((event) => event.type), ["user_message", "agent_message", "tool_call", "tool_result"]);
     await discovery.poll(); assert.equal(registry.transcript("019c-test-thread").length, 4);

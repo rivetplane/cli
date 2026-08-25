@@ -6,6 +6,7 @@ import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import crossSpawn from "cross-spawn";
 import type { JsonValue, PendingInteraction, Question, SessionStatus } from "@rivetplane/shared/model";
+import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
@@ -320,6 +321,14 @@ export class OpenCodeExportDiscovery {
   stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
   target(id: string): CommandTarget | undefined { return this.#present.has(id) ? new ReadOnlyOpenCodeTarget() : undefined; }
   harnesses(): HarnessDiscoveryStatus[] { return this.#executable ? [{ harness_type: "opencode", discovered_sessions: this.#present.size, attached_sessions: this.registry.list().filter((session) => session.harness_type === "opencode").length }] : []; }
+  capabilities(): HarnessCapabilities | undefined {
+    if (!this.#executable) return undefined;
+    const reason = "Sessions discovered with 'opencode session list' and 'opencode export' are read-only; use 'rivetplane opencode' for live control";
+    const readOnly = { supported: true, mode: "read_only" as const };
+    const unsupported = { supported: false, mode: "unsupported" as const, reason };
+    return { machine_id: this.machine_id, harness_type: "opencode", can_create_session: false, directories: [], models: [], reported_at: new Date().toISOString(), transport: "opencode-cli-export",
+      session_capabilities: { persisted_discovery: readOnly, discovery: readOnly, transcript: readOnly, live_attachment: unsupported, messaging: unsupported, interrupt: unsupported, question_response: unsupported, approval_response: unsupported }, limitations: [reason] };
+  }
   get executable(): string | undefined { return this.#executable; }
 
   async poll(): Promise<void> {

@@ -84,7 +84,7 @@ export class HarnessControlClient {
         if (command.harness_type === "codex" && this.codex_app_server) return this.codex_app_server.createSession(command);
         throw new Error("Harness cannot create sessions");
       },
-      capabilities: () => [this.opencode?.capabilities(), this.codex_app_server?.capabilities(), this.claude_code?.capabilities()].filter((value): value is NonNullable<typeof value> => Boolean(value)),
+      capabilities: () => [this.opencode?.capabilities() ?? this.opencode_exports?.capabilities(), this.codex_app_server?.capabilities() ?? this.codex_rollouts?.capabilities(), this.claude_code?.capabilities()].filter((value): value is NonNullable<typeof value> => Boolean(value)),
     });
     this.manager.registry.on("warning", (error) => this.manager.registry.emit("log", `Warning: ${error instanceof Error ? error.message : String(error)}`));
   }
