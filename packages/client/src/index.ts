@@ -3,6 +3,7 @@ export * from "./client.js";
 export * from "./credentials.js";
 export * from "./discovery.js";
 export * from "./local-api.js";
+export * from "./opencode-export-discovery.js";
 export * from "./registry.js";
 export * from "./relay.js";
 export * from "./session-manager.js";

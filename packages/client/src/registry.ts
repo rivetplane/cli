@@ -34,9 +34,9 @@ export class SessionRegistry extends EventEmitter {
     this.emit("session", structuredClone(entry.session));
   }
 
-  append<T extends TranscriptEventType>(id: string, type: T, payload: TranscriptEventPayloadMap[T]): TranscriptEvent {
+  append<T extends TranscriptEventType>(id: string, type: T, payload: TranscriptEventPayloadMap[T], source?: { id?: string; ts?: string }): TranscriptEvent {
     const entry = this.#require(id);
-    const event = { id: randomUUID(), session_id: id, seq: entry.next_seq++, ts: new Date().toISOString(), type, payload } as TranscriptEvent;
+    const event = { id: source?.id ?? randomUUID(), session_id: id, seq: entry.next_seq++, ts: source?.ts ?? new Date().toISOString(), type, payload } as TranscriptEvent;
     entry.transcript.push(event);
     entry.session = { ...entry.session, last_activity_at: event.ts };
     this.emit("transcript", structuredClone(event));

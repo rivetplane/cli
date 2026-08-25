@@ -1,0 +1,23 @@
+{
+  "info": {
+    "id": "ses_question",
+    "title": "Question session",
+    "directory": "/work/project",
+    "time": { "created": 1787659200000, "updated": 1787659210000 }
+  },
+  "messages": [
+    {
+      "info": { "id": "msg_user", "sessionID": "ses_question", "role": "user", "agent": "build", "model": { "providerID": "anthropic", "modelID": "claude-sonnet" }, "time": { "created": 1787659201000 } },
+      "parts": [
+        { "id": "part_user", "sessionID": "ses_question", "messageID": "msg_user", "type": "text", "text": "Choose a deployment mode." }
+      ]
+    },
+    {
+      "info": { "id": "msg_agent", "sessionID": "ses_question", "role": "assistant", "providerID": "anthropic", "modelID": "claude-sonnet", "mode": "build", "path": { "cwd": "/work/project", "root": "/work/project" }, "time": { "created": 1787659202000, "completed": 1787659210000 } },
+      "parts": [
+        { "id": "part_agent", "sessionID": "ses_question", "messageID": "msg_agent", "type": "text", "text": "I need one choice." },
+        { "id": "part_question", "sessionID": "ses_question", "messageID": "msg_agent", "type": "tool", "callID": "call_question_1", "tool": "question", "state": { "status": "completed", "input": { "questions": [{ "question": "Which deployment mode should I use?", "header": "Deploy mode", "options": [{ "label": "Safe", "description": "Run checks before deployment." }] }] }, "output": "Safe", "title": "Answered", "metadata": {}, "time": { "start": 1787659203000, "end": 1787659209000 } } }
+      ]
+    }
+  ]
+}

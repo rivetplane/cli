@@ -50,6 +50,7 @@ export interface Approval {
   requested_at: Timestamp;
   resolved_at?: Timestamp;
   resolution?: ApprovalResolution;
+  read_only?: boolean;
 }
 
 export interface Question {
@@ -57,7 +58,20 @@ export interface Question {
   id: string;
   session_id: string;
   prompt: string;
+  /** Short label supplied by the harness. */
+  header?: string;
   options?: string[];
+  option_details?: Array<{ label: string; description?: string }>;
+  questions?: Array<{
+    prompt: string;
+    header: string;
+    options: Array<{ label: string; description?: string }>;
+    multiple?: boolean;
+    custom?: boolean;
+  }>;
+  tool_call_id?: string;
+  /** True when this adapter can observe, but cannot answer, the request. */
+  read_only?: boolean;
   requested_at: Timestamp;
   resolved_at?: Timestamp;
   response?: string;
@@ -74,6 +88,12 @@ export interface Session {
   created_at: Timestamp;
   last_activity_at: Timestamp;
   pending: PendingInteraction | null;
+  title?: string;
+  model?: { provider_id: string; model_id: string };
+  agent?: string;
+  /** True when Rivetplane cannot send commands to the source process. */
+  read_only?: boolean;
+  metadata?: JsonValue;
 }
 
 export interface UserMessagePayload {

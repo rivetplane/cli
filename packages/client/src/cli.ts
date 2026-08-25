@@ -11,16 +11,18 @@ const { version } = require("../package.json") as { version: string };
 const HELP = `Rivetplane local client
 
 Usage:
-  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-url URL] [--opencode-directory PATH] [--no-opencode] [--no-opencode-tui] [--no-relay]
+  rivetplane [--local-port PORT] [--discovery-dir PATH] [--opencode-directory PATH] [--opencode-executable PATH] [--opencode-checkpoint PATH] [--no-opencode] [--no-opencode-export] [--no-relay]
+  rivetplane --opencode-url URL [client options]
   rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
   rivetplane --help
 
-The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, starts a
-loopback-only OpenCode server when OpenCode is installed, and exposes the local API at
-http://127.0.0.1:PORT/v1. In an interactive terminal, it opens an OpenCode TUI attached
-to that managed server. Use --no-opencode-tui for background-only relay mode. Login uses
-https://rivetplane.com unless --server or HARNESS_CP_SERVER selects a self-hosted control plane.`;
+The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, and reads existing
+OpenCode sessions with 'opencode session list' and 'opencode export'. Export discovery
+is read-only. It can show pending questions, but it cannot answer them in the original
+process. The client does not start OpenCode by default. Use 'rivetplane opencode' for
+the managed server and attached TUI mode. Login uses https://rivetplane.com unless
+--server or HARNESS_CP_SERVER selects a self-hosted control plane.`;
 
 function flag(name: string): string | undefined { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }
 
@@ -41,7 +43,7 @@ async function main(): Promise<void> {
   }
 
   const explicitOpenCode = process.argv[2] === "opencode";
-  const attachOpenCode = explicitOpenCode || (!process.argv.includes("--no-opencode-tui") && process.stdin.isTTY && process.stdout.isTTY);
+  const attachOpenCode = explicitOpenCode;
   const credentials = await readCredentials();
   const discoveryDirectory = flag("--discovery-dir");
   const localPort = Number(flag("--local-port") ?? process.env.HARNESS_CP_LOCAL_PORT ?? 41737);
@@ -52,14 +54,18 @@ async function main(): Promise<void> {
     local_port: localPort,
     relay: !process.argv.includes("--no-relay"),
     opencode_url: process.argv.includes("--no-opencode") ? false : (flag("--opencode-url") ?? process.env.HARNESS_CP_OPENCODE_URL),
+    opencode_managed: explicitOpenCode,
+    opencode_export: !process.argv.includes("--no-opencode-export") && !process.argv.includes("--no-opencode") && !explicitOpenCode && !flag("--opencode-url") && !process.env.HARNESS_CP_OPENCODE_URL,
     opencode_directory: flag("--opencode-directory") ?? process.env.HARNESS_CP_OPENCODE_DIRECTORY ?? process.cwd(),
+    opencode_executable: flag("--opencode-executable") ?? process.env.HARNESS_CP_OPENCODE_EXECUTABLE,
+    opencode_checkpoint_path: flag("--opencode-checkpoint") ?? process.env.HARNESS_CP_OPENCODE_CHECKPOINT,
   });
   client.manager.registry.on("log", (message) => process.stderr.write(`${String(message)}\n`));
   const started = await client.start();
   process.stdout.write(`Local API: http://127.0.0.1:${started.local_port}/v1\n`);
   process.stdout.write(credentials && !process.argv.includes("--no-relay") ? `Relay: ${credentials.server_url}\n` : "Relay: disabled (run rivetplane login to pair this machine)\n");
   const harnesses = client.harnesses();
-  if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode: ${client.opencode ? `${client.opencode.url} for ${client.opencode.directory}` : "disabled"})\n`);
+  if (harnesses.length === 0) process.stdout.write(`Harnesses: none found (ACP: ${client.manager.discovery.directory}; OpenCode export: ${client.opencode_exports?.executable ?? "not found"}; managed OpenCode: ${client.opencode ? client.opencode.url : "disabled"})\n`);
   else for (const harness of harnesses) process.stdout.write(`Harness: ${harness.harness_type} (${harness.attached_sessions}/${harness.discovered_sessions} sessions attached)\n`);
   let stopping = false;
   let attachedProcess: ChildProcess | undefined;
