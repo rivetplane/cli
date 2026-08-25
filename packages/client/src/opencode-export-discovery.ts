@@ -319,7 +319,7 @@ export class OpenCodeExportDiscovery {
   }
   stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
   target(id: string): CommandTarget | undefined { return this.#present.has(id) ? new ReadOnlyOpenCodeTarget() : undefined; }
-  harnesses(): HarnessDiscoveryStatus[] { return this.#executable ? [{ harness_type: "opencode", discovered_sessions: this.#present.size, attached_sessions: this.#present.size }] : []; }
+  harnesses(): HarnessDiscoveryStatus[] { return this.#executable ? [{ harness_type: "opencode", discovered_sessions: this.#present.size, attached_sessions: this.registry.list().filter((session) => session.harness_type === "opencode").length }] : []; }
   get executable(): string | undefined { return this.#executable; }
 
   async poll(): Promise<void> {
@@ -332,6 +332,11 @@ export class OpenCodeExportDiscovery {
       if (this.#now() >= this.#nextIndexRefreshAt) await this.#refreshIndex(command, common);
       const indexed = [...this.#index.values()].sort((a, b) => this.#updated(b) - this.#updated(a));
       const recentAfter = this.#now() - (this.options.recent_window_ms ?? 5 * 60_000);
+      for (const current of this.registry.list().filter((session) => session.harness_type === "opencode")) {
+        const listed = this.#index.get(current.id);
+        const active = current.pending || current.status === "running" || (listed && this.#updated(listed) >= recentAfter);
+        if (!active) this.registry.remove(current.id);
+      }
       const eligible = indexed.filter((session) => {
         const failure = this.#exportFailures.get(session.id);
         if (failure && failure.next_attempt_at > this.#now()) return false;
@@ -385,7 +390,7 @@ export class OpenCodeExportDiscovery {
     if (authoritative) for (const id of this.#present) if (!next.has(id)) this.registry.remove(id);
     this.#index = next; this.#present = new Set(next.keys());
     this.#probeIds = new Set([...next.values()].sort((a, b) => this.#updated(b) - this.#updated(a)).slice(0, this.#positiveLimit(this.options.max_export_candidates, 48)).map((session) => session.id));
-    for (const session of listed) this.#upsertListSnapshot(session);
+    for (const session of listed) if (this.registry.get(session.id)) this.#upsertListSnapshot(session);
 
     const duration = Math.max(0, this.#now() - started); const base = this.#indexInterval();
     const maximum = this.#positiveLimit(this.options.max_index_interval_ms, 5 * 60_000);

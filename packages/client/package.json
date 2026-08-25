@@ -1,6 +1,6 @@
 {
   "name": "rivetplane",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Connect local agent harnesses to the Rivetplane control plane",
   "keywords": [
     "acp",
