@@ -148,6 +148,21 @@ test("limits concurrent OpenCode exports independently from index scans", async 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("removes a stale non-running OpenCode session from the relay registry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-stale-roster-")); let now = 1_800_000_000_000; const removed: string[] = [];
+  const runner: CommandRunner = async (_program, args) => {
+    if (args[0] === "debug") return { stdout: JSON.stringify([{ id: "project", worktree: directory, sandboxes: [] }]), stderr: "" };
+    if (args.includes("list")) return { stdout: JSON.stringify([{ id: "ses_stale", directory, created: now - 1_000, updated: 1_800_000_000_000 }]), stderr: "" };
+    return { stdout: JSON.stringify({ info: { id: "ses_stale", directory, time: { created: now - 1_000, updated: 1_800_000_000_000 } }, messages: [] }), stderr: "" };
+  };
+  try {
+    const registry = new SessionRegistry(); registry.on("removed", (id) => removed.push(String(id)));
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, now: () => now });
+    await manager.poll(); assert.equal(registry.get("ses_stale")?.id, "ses_stale");
+    now += 5 * 60_000 + 1; await manager.poll(); assert.equal(registry.get("ses_stale"), undefined); assert.deepEqual(removed, ["ses_stale"]); manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("resolves OpenCode executables with Unix and Windows PATH rules", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-resolve-"));
   try {
@@ -215,9 +230,10 @@ test("caches thousands of indexed sessions across repeated transcript polls", as
   try {
     const logs: string[] = []; const registry = new SessionRegistry(); registry.on("log", (message) => logs.push(String(message)));
     const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner, now: () => now, index_interval_ms: 60_000, max_exports_per_poll: 4, max_export_candidates: 16 });
-    await manager.poll(); assert.equal(registry.list().length, 2_501); assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 4);
+    await manager.poll(); assert.equal(registry.list().length, 4); assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 4);
     for (let poll = 0; poll < 5; poll++) { now += 2_000; await manager.poll(); }
-    assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 16);
+    assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 16); assert.equal(registry.list().length, 0);
+    assert.deepEqual(manager.harnesses(), [{ harness_type: "opencode", discovered_sessions: 2_501, attached_sessions: 0 }]);
     assert.equal(logs.some((message) => message.includes("index refresh completed in") && message.includes("2501 cached sessions")), true);
     assert.equal(logs.some((message) => message.includes("16 active, recent, or probe candidates") && message.includes("selected 16") && message.includes("exporting 4")), true);
     assert.equal(logs.some((message) => message.includes("0 active, recent, or probe candidates") && message.includes("exporting 0")), true); manager.stop();
