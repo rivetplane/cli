@@ -1,0 +1,11 @@
+{
+  "cwd": "/work/repo",
+  "hook_event_name": "Stop",
+  "last_assistant_message": "The command is complete.",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "default",
+  "session_id": "019c-codex-session-full",
+  "stop_hook_active": false,
+  "transcript_path": null,
+  "turn_id": "codex-turn-full"
+}

@@ -36,6 +36,7 @@ export interface ClientOptions {
   codex_token?: string;
   codex_directory?: string;
   codex_executable?: string;
+  codex_socket_path?: string;
   codex_sessions_directory?: string;
   codex_checkpoint_path?: string;
   claude_code?: boolean;
@@ -60,7 +61,7 @@ export class HarnessControlClient {
     this.manager = new SessionManager(machineId, { ...(options.discovery_directory ? { directory: options.discovery_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
     this.hooks = new HookIngestor(machineId, this.manager.registry);
     if (typeof options.opencode_url === "string" || options.opencode_managed) this.opencode = new OpenCodeManager(machineId, this.manager.registry, { ...(typeof options.opencode_url === "string" ? { url: options.opencode_url } : {}), ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
-    this.hooks.setAuthoritativeTarget((harness, id) => harness === "opencode" && Boolean(this.opencode?.target(id)));
+    this.hooks.setAuthoritativeTarget((harness, id) => harness === "opencode" && Boolean(this.opencode?.target(id)) || harness === "codex" && Boolean(this.codex_app_server?.target(id)));
     const exportEnabled = options.opencode_export ?? (!options.opencode_managed && typeof options.opencode_url !== "string");
     if (options.opencode_url !== false && exportEnabled) this.opencode_exports = new OpenCodeExportDiscovery(machineId, this.manager.registry, {
       ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.opencode_executable ? { executable: options.opencode_executable } : {}),
@@ -76,7 +77,8 @@ export class HarnessControlClient {
     });
     if (options.codex_managed || options.codex_endpoint) this.codex_app_server = new CodexAppServerManager(machineId, this.manager.registry, {
       managed: options.codex_managed ?? false, ...(options.codex_endpoint ? { endpoint: options.codex_endpoint } : {}), ...(options.codex_token ? { token: options.codex_token } : {}),
-      ...(options.codex_directory ? { directory: options.codex_directory } : {}), ...(options.codex_executable ? { executable: options.codex_executable } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
+      ...(options.codex_directory ? { directory: options.codex_directory } : {}), ...(options.codex_executable ? { executable: options.codex_executable } : {}),
+      ...(options.codex_socket_path ? { socket_path: options.codex_socket_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });
     if (options.claude_code !== false) this.claude_code = new ClaudeCodeDiscovery(machineId, this.manager.registry, {
       ...(options.claude_executable ? { executable: options.claude_executable } : {}), ...(options.claude_config_dir ? { config_dir: options.claude_config_dir } : {}),

@@ -38,7 +38,9 @@ transcript poll uses the cached index. Claude Code sessions are discovered machi
 with 'claude agents --json'. Their JSONL transcripts and exact-ID pending records are
 read-only because Claude has no documented local exact-ID reply API. Private cc-socks
 are never used. The client does not start OpenCode by default. Use 'rivetplane opencode' for
-the managed server and attached TUI mode. Login uses https://rivetplane.com unless
+the managed server and attached TUI mode. Verified standalone Codex hooks provide
+lifecycle and local approval attention only; they do not provide remote responses or
+request_user_input. Use 'rivetplane codex' for exact app-server control. Login uses https://rivetplane.com unless
 --server or HARNESS_CP_SERVER selects a self-hosted control plane.`;
 
 function flag(name: string): string | undefined { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }

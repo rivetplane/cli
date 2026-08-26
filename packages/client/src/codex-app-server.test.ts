@@ -36,11 +36,12 @@ test("uses app-server request IDs exactly and supports messages, questions, appr
   const registry = new SessionRegistry(); const logs: string[] = []; registry.on("log", (value) => logs.push(String(value)));
   const manager = new CodexAppServerManager("machine-1", registry, { endpoint: `ws://127.0.0.1:${port}`, directory: "/repo", interval_ms: 60_000, max_threads: 1 });
   try {
-    await manager.start(); assert.equal(registry.get("thread-1")?.read_only, false); assert.equal(registry.get("thread-old"), undefined); assert.equal(manager.harnesses()[0]?.attached_sessions, 1); assert.equal(manager.health().live_attachment.supported, true);
+    await manager.start(); assert.equal(registry.get("thread-1")?.read_only, true); assert.equal(registry.get("thread-old"), undefined); assert.equal(manager.harnesses()[0]?.attached_sessions, 0); assert.equal(manager.health().live_attachment.supported, true);
     await manager.setThreadName("thread-1", "Rivetplane protocol test"); assert.equal(registry.get("thread-1")?.title, "Rivetplane protocol test");
     assert.equal(received.some((message) => message.method === "thread/name/set" && (message.params as Message).threadId === "thread-1"), true);
     assert.deepEqual(registry.transcript("thread-1").map((event) => event.type), ["user_message", "agent_message"]);
     await manager.target("thread-1")!.sendMessage("continue"); await eventually(() => registry.transcript("thread-1").some((event) => event.type === "agent_message" && event.payload.text === "stream"), "streamed delta");
+    assert.equal(registry.get("thread-1")?.read_only, false); assert.equal(manager.harnesses()[0]?.attached_sessions, 1);
     await manager.target("thread-1")!.interrupt(); assert.equal(received.some((message) => message.method === "turn/interrupt" && (message.params as Message).turnId === "turn-1"), true);
 
     peer!.send(JSON.stringify({ method: "item/commandExecution/requestApproval", id: 42, params: { threadId: "thread-1", turnId: "turn-2", itemId: "cmd-1", startedAtMs: 1_000, command: "echo test" } }));

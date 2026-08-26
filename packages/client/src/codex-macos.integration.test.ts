@@ -19,7 +19,9 @@ async function json<T>(url: string): Promise<T> {
 
 test("macOS managed Codex app-server end to end", { skip: process.platform !== "darwin" || process.env.RIVETPLANE_CODEX_INTEGRATION !== "1", timeout: 240_000 }, async () => {
   const repo = await mkdtemp(join(tmpdir(), "rivetplane-codex-e2e-")); await run("git", ["init", "-q", repo]);
-  let client = new HarnessControlClient({ local_port: 0, relay: false, codex: false, codex_managed: true, codex_directory: repo, discovery_interval_ms: 500 });
+  const socketPath = join(repo, "app-server.sock"); const hookDiscoveryPath = join(repo, "hook-endpoint.json");
+  const options = { local_port: 0, relay: false, codex: false, codex_managed: true, codex_directory: repo, codex_socket_path: socketPath, hook_discovery_path: hookDiscoveryPath, discovery_interval_ms: 500 } as const;
+  let client = new HarnessControlClient(options);
   client.manager.registry.on("warning", (error) => process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`));
   let threadId = ""; let port = 0;
   try {
@@ -57,7 +59,7 @@ test("macOS managed Codex app-server end to end", { skip: process.platform !== "
     }
     await eventually(() => client.manager.registry.get(threadId)?.status, (status) => status === "running", "running turn before interrupt"); const interrupted = await fetch(`http://127.0.0.1:${port}/v1/sessions/${threadId}/interrupt`, { method: "POST" }); assert.equal(interrupted.status, 202);
 
-    await client.stop(); client = new HarnessControlClient({ local_port: 0, relay: false, codex: false, codex_managed: true, codex_directory: repo, discovery_interval_ms: 500 }); ({ local_port: port } = await client.start());
+    await client.stop(); client = new HarnessControlClient(options); ({ local_port: port } = await client.start());
     await eventually(async () => (await fetch(`http://127.0.0.1:${port}/v1/sessions/${threadId}`)).status, (status) => status === 200, "thread recovery after app-server restart");
     process.stdout.write(`Codex integration thread: ${threadId} (clearly labeled as a Rivetplane managed integration test)\n`);
   } finally { await client.stop().catch(() => undefined); await rm(repo, { recursive: true, force: true }); }

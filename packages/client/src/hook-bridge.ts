@@ -1,5 +1,5 @@
 import type { NativeHookEnvelope, HookBridgeResult } from "./hook-ingestion.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { defaultHookDiscoveryPath, HOOK_OWNER, readHookDiscovery, validateHookEndpoint } from "./hook-discovery.js";
 
 const MAX_STDIN = 1_000_000;
@@ -21,9 +21,12 @@ export function toHookEnvelope(harness: string, configuredEvent: string, payload
   const event = firstString(payload, ["hook_event_name", "event", "type"]) ?? configuredEvent;
   const cwd = firstString(payload, ["cwd", "directory", "working_directory"]) ?? process.cwd();
   const nativeRequestId = firstString(payload, ["request_id", "requestId", "requestID", "permission_request_id", "tool_use_id", "toolUseId", "tool_call_id", "toolCallId", ...(harness === "opencode" ? ["id"] : [])]);
-  const request_id = nativeRequestId ?? (harness === "claude-code" && event === "PermissionRequest" ? `rivetplane-${randomUUID()}` : undefined);
+  const telemetryIdentity = !nativeRequestId && harness === "codex" && event === "PermissionRequest"
+    ? `codex-telemetry-${createHash("sha256").update(session_id).update("\0").update(String(payload.turn_id ?? "")).update("\0").update(String(payload.tool_name ?? "")).update("\0").update(JSON.stringify(payload.tool_input ?? null)).digest("hex").slice(0, 32)}`
+    : undefined;
+  const request_id = nativeRequestId ?? (harness === "claude-code" && event === "PermissionRequest" ? `rivetplane-${randomUUID()}` : telemetryIdentity);
   return { version: 1, harness, event, session_id, cwd, transport: harness === "opencode" ? "opencode-plugin" : `${harness}-hook-command`, payload,
-    ...(request_id ? { request_id } : {}), ...(firstString(payload, ["model", "model_id"]) ? { model: firstString(payload, ["model", "model_id"])! } : {}),
+    ...(request_id ? { request_id } : {}), ...(telemetryIdentity ? { request_id_kind: "telemetry" as const } : nativeRequestId ? { request_id_kind: "native" as const } : {}), ...(firstString(payload, ["model", "model_id"]) ? { model: firstString(payload, ["model", "model_id"])! } : {}),
     ...(firstString(payload, ["agent", "agent_name"]) ? { agent: firstString(payload, ["agent", "agent_name"])! } : {}),
     ...(firstString(payload, ["timestamp"]) ? { timestamp: firstString(payload, ["timestamp"])! } : {}) };
 }

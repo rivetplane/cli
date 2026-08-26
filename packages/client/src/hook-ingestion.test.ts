@@ -47,7 +47,7 @@ test("normalizes official OpenCode permission and multi-question event fixtures"
   const questionWait = hooks.ingest(toHookEnvelope("opencode", question.type, question.properties)); await tick();
   hooks.respond("opencode-session-full", "question-full", '[["Safe"],["Tests","Lint"]]');
   assert.deepEqual((await questionWait).updated_input, { answers: [["Safe"], ["Tests", "Lint"]] });
-  assert.deepEqual(hooks.harnesses(), [{ harness_type: "opencode", discovered_sessions: 1, attached_sessions: 1 }]);
+  assert.deepEqual(hooks.harnesses(), [{ harness_type: "opencode", discovered_sessions: 1, attached_sessions: 1, discovered_session_ids: ["opencode-session-full"], attached_session_ids: ["opencode-session-full"] }]);
   assert.equal(hooks.capabilities()[0]?.session_capabilities?.question_response.supported, true);
 });
 
@@ -101,9 +101,33 @@ test("maps Stop to waiting_input and only explicit session termination to comple
   assert.equal(registry.get("opencode-session-full")?.status, "waiting_input");
 });
 
+test("records standalone Codex approval telemetry without a native response and clears it on the matching tool event", async () => {
+  const permission = await fixture<Record<string, unknown>>("codex", "permission-request.json");
+  const preTool = await fixture<Record<string, unknown>>("codex", "pre-tool-use.json");
+  const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 1_000);
+  const envelope = toHookEnvelope("codex", "PermissionRequest", permission);
+  assert.equal(envelope.request_id_kind, "telemetry"); assert.match(envelope.request_id ?? "", /^codex-telemetry-[a-f0-9]{32}$/);
+  assert.deepEqual(await hooks.ingest(envelope), { decision: "neutral" });
+  const pending = registry.get(envelope.session_id)?.pending;
+  assert.equal(pending?.id, envelope.request_id); assert.equal(pending?.read_only, true); assert.equal(registry.get(envelope.session_id)?.read_only, true);
+  assert.equal(hooks.target(envelope.session_id), undefined); assert.equal(hooks.capabilities()[0]?.session_capabilities?.approval_response.supported, false); assert.equal(hooks.capabilities()[0]?.session_capabilities?.question_response.supported, false);
+  assert.deepEqual(hooks.harnesses()[0]?.discovered_session_ids, [envelope.session_id]);
+  assert.deepEqual(await hooks.ingest(toHookEnvelope("codex", "PreToolUse", preTool)), { decision: "neutral" });
+  assert.equal(registry.get(envelope.session_id)?.pending, null); assert.equal(registry.get(envelope.session_id)?.status, "running");
+});
+
+test("standalone Codex hooks do not overwrite an actively managed app-server session", async () => {
+  const permission = await fixture<Record<string, unknown>>("codex", "permission-request.json"); const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 1_000);
+  registry.upsert({ id: "019c-codex-session-full", machine_id: "machine-1", harness_type: "codex", cwd: "/managed", status: "running", created_at: new Date().toISOString(), last_activity_at: new Date().toISOString(), pending: null, read_only: false, metadata: { codex_control: "app-server", transport: "codex-app-server" } });
+  hooks.setAuthoritativeTarget((harness, id) => harness === "codex" && id === "019c-codex-session-full");
+  assert.deepEqual(await hooks.ingest(toHookEnvelope("codex", "PermissionRequest", permission)), { decision: "neutral" });
+  assert.equal(registry.get("019c-codex-session-full")?.cwd, "/managed"); assert.equal(registry.get("019c-codex-session-full")?.read_only, false); assert.equal(registry.get("019c-codex-session-full")?.pending, null);
+});
+
 test("rejects unverified harness payloads and malformed verified identities", async () => {
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 10);
-  await assert.rejects(hooks.ingest({ version: 1, harness: "codex", event: "PreToolUse", session_id: "s", cwd: "/repo", transport: "codex-hook", payload: {} }), /unsupported/);
+  await assert.rejects(hooks.ingest({ version: 1, harness: "grok", event: "PreToolUse", session_id: "s", cwd: "/repo", transport: "grok-hook", payload: {} }), /unsupported/);
+  await assert.rejects(hooks.ingest({ version: 1, harness: "codex", event: "PreToolUse", session_id: "s", cwd: "/repo", transport: "codex-hook-command", payload: {} }), /identity/);
   const payload = await fixture<Record<string, unknown>>("claude-code", "ask-user-question.json");
   await assert.rejects(hooks.ingest({ ...toHookEnvelope("claude-code", "PreToolUse", payload), session_id: "wrong" }), /identity/);
 });

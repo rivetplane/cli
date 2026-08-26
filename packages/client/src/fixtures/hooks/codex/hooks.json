@@ -1,0 +1,11 @@
+{
+  "description": "Rivetplane standalone telemetry hooks (rivetplane-hook-v1)",
+  "hooks": {
+    "SessionStart": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness codex --event SessionStart", "timeout": 3, "async": true, "statusMessage": "Reporting telemetry to Rivetplane" }] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness codex --event PreToolUse", "timeout": 3, "async": true, "statusMessage": "Reporting telemetry to Rivetplane" }] }],
+    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness codex --event PermissionRequest", "timeout": 3, "async": true, "statusMessage": "Reporting telemetry to Rivetplane" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness codex --event PostToolUse", "timeout": 3, "async": true, "statusMessage": "Reporting telemetry to Rivetplane" }] }],
+    "Stop": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness codex --event Stop", "timeout": 3, "async": true, "statusMessage": "Reporting telemetry to Rivetplane" }] }],
+    "SessionEnd": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness codex --event SessionEnd", "timeout": 1, "async": false, "statusMessage": "Reporting telemetry to Rivetplane" }] }]
+  }
+}

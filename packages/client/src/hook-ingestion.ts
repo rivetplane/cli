@@ -15,6 +15,7 @@ export interface NativeHookEnvelope {
   event: string;
   session_id: string;
   request_id?: string;
+  request_id_kind?: "native" | "telemetry";
   cwd: string;
   model?: string;
   agent?: string;
@@ -39,6 +40,7 @@ const ACTIONABLE_EVENTS: Record<string, Set<string>> = {
 };
 const VERIFIED_EVENTS: Record<string, Set<string>> = {
   "claude-code": new Set(["PermissionRequest", "PreToolUse", "AskUserQuestion", "PostToolUse", "Stop", "SessionEnd"]),
+  codex: new Set(["SessionStart", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionEnd"]),
   opencode: new Set(["session.created", "session.updated", "session.status", "session.idle", "session.deleted", "session.error", "permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"]),
 };
 
@@ -54,6 +56,7 @@ function eventId(input: NativeHookEnvelope): string {
 
 function eventMode(input: NativeHookEnvelope): HookActionMode {
   if (ACTIONABLE_EVENTS[input.harness]?.has(input.event)) return "actionable";
+  if (input.harness === "codex" && input.event === "PermissionRequest") return "telemetry";
   if (/^(PreToolUse|PostToolUse|PostToolUseFailure|beforeShellExecution|BeforeTool|AfterTool|preToolUse|postToolUse|tool_execution_start|tool_execution_end)$/i.test(input.event)) return "telemetry";
   return "lifecycle";
 }
@@ -66,6 +69,7 @@ export function validateHookEnvelope(value: unknown): NativeHookEnvelope {
     version: HOOK_PROTOCOL_VERSION, harness: input.harness as string, event: input.event as string,
     session_id: input.session_id as string, cwd: input.cwd as string, transport: input.transport as string,
     ...(string(input.request_id) ? { request_id: input.request_id as string } : {}),
+    ...(input.request_id_kind === "native" || input.request_id_kind === "telemetry" ? { request_id_kind: input.request_id_kind } : {}),
     ...(string(input.model) ? { model: input.model as string } : {}), ...(string(input.agent) ? { agent: input.agent as string } : {}),
     ...(string(input.timestamp) ? { timestamp: input.timestamp as string } : {}),
     ...(typeof input.cursor === "string" || typeof input.cursor === "number" ? { cursor: input.cursor } : {}), payload: object(input.payload),
@@ -82,10 +86,11 @@ export class HookIngestor {
 
   target(id: string): CommandTarget | undefined { return this.#targets.has(id) ? new HookTarget(this, id) : undefined; }
   setAuthoritativeTarget(check: (harness: string, sessionId: string) => boolean): void { this.#authoritativeTarget = check; }
-  harnesses(): Array<{ harness_type: string; discovered_sessions: number; attached_sessions: number }> {
-    const counts = new Map<string, number>();
-    for (const session of this.registry.list()) if (this.#harnesses.has(session.harness_type) && session.metadata && object(session.metadata).transport === this.#harnesses.get(session.harness_type)?.transport) counts.set(session.harness_type, (counts.get(session.harness_type) ?? 0) + 1);
-    return [...this.#harnesses.keys()].map((harness_type) => ({ harness_type, discovered_sessions: counts.get(harness_type) ?? 0, attached_sessions: counts.get(harness_type) ?? 0 }));
+  harnesses(): Array<{ harness_type: string; discovered_sessions: number; attached_sessions: number; discovered_session_ids: string[]; attached_session_ids: string[] }> {
+    return [...this.#harnesses.keys()].map((harness_type) => {
+      const ids = this.registry.list().filter((session) => session.harness_type === harness_type && session.metadata && object(session.metadata).transport === this.#harnesses.get(harness_type)?.transport).map((session) => session.id);
+      return { harness_type, discovered_sessions: ids.length, attached_sessions: ids.length, discovered_session_ids: ids, attached_session_ids: ids };
+    });
   }
   capabilities(): HarnessCapabilities[] {
     return [...this.#harnesses].map(([harness, state]) => {
@@ -104,6 +109,7 @@ export class HookIngestor {
 
   async ingest(raw: unknown): Promise<HookBridgeResult> {
     let input = validateHookEnvelope(raw);
+    if (input.harness === "codex" && input.event === "PermissionRequest" && !input.request_id) input = withCodexTelemetryIdentity(input);
     validateVerifiedPayload(input);
     if (input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion") input = { ...input, event: "AskUserQuestion" };
     const id = input.session_id; const ts = timestamp(input.timestamp); const mode = eventMode(input);
@@ -117,13 +123,15 @@ export class HookIngestor {
       this.#cursors.set(cursorKey, input.cursor);
     }
     const prior = this.registry.get(id);
+    if (this.#authoritativeTarget(input.harness, id)) return { decision: "neutral" };
+    const clearTelemetry = shouldClearTelemetryPending(input, prior);
     const status = this.#status(input.event, prior?.status);
     this.registry.upsert({
       id, machine_id: this.machine_id, harness_type: input.harness, cwd: input.cwd, status,
-      created_at: prior?.created_at ?? ts, last_activity_at: ts, pending: prior?.pending ?? null,
+      created_at: prior?.created_at ?? ts, last_activity_at: ts, pending: clearTelemetry ? null : prior?.pending ?? null,
       ...(input.model ? { model: parseModel(input.model) } : prior?.model ? { model: prior.model } : {}),
       ...(input.agent ? { agent: input.agent } : prior?.agent ? { agent: prior.agent } : {}), read_only: harnessMode !== "actionable",
-      metadata: { transport: input.transport, hook_event: input.event, hook_mode: harnessMode, ...(input.harness === "campfire" ? { role: "host" } : {}) } as JsonValue,
+      metadata: { ...object(prior?.metadata), transport: input.transport, hook_event: input.event, hook_mode: harnessMode, ...(clearTelemetry ? { hook_pending: null } : {}), ...(input.harness === "campfire" ? { role: "host" } : {}) } as JsonValue,
     }, { authority: harnessMode === "actionable" ? 80 : 40 });
 
     const idempotency = { id: eventId(input), ts };
@@ -144,8 +152,9 @@ export class HookIngestor {
       if (isResolution(input.event) && input.request_id) this.#settle(id, input.request_id, { decision: "neutral" }, true);
       return { decision: "neutral" };
     }
-    if (this.#authoritativeTarget(input.harness, id)) return { decision: "neutral" };
     this.registry.setPending(id, pending);
+    const session = this.registry.get(id);
+    if (session) this.registry.upsert({ ...session, metadata: { ...object(session.metadata), hook_pending: { id: pending.id, turn_id: string(input.payload.turn_id), ...(input.request_id_kind === "native" ? { tool_use_id: pending.id } : {}) } } as JsonValue }, { authority: 40 });
     this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
     if (pending.type === "approval") this.registry.append(id, "permission_request", { approval_id: pending.id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary }, idempotency);
     if (mode !== "actionable") return { decision: "neutral" };
@@ -241,6 +250,15 @@ function validateVerifiedPayload(input: NativeHookEnvelope): void {
     if (input.event === "PermissionRequest" && (!input.request_id || !input.request_id.startsWith("rivetplane-"))) throw new Error("Claude PermissionRequest needs a Rivetplane bridge ID");
     return;
   }
+  if (input.harness === "codex") {
+    if (input.transport !== "codex-hook-command") throw new Error("Codex hook transport is invalid");
+    if (input.payload.session_id !== input.session_id || input.payload.cwd !== input.cwd || input.payload.hook_event_name !== input.event) throw new Error("Codex hook identity does not match its official payload");
+    if (!string(input.payload.turn_id) && /^(PreToolUse|PostToolUse|PermissionRequest|Stop)$/.test(input.event)) throw new Error("Codex turn ID is required");
+    if (/^(PreToolUse|PostToolUse)$/.test(input.event) && string(input.payload.tool_use_id) !== input.request_id) throw new Error("Codex tool-use ID does not match");
+    if (/^(PreToolUse|PostToolUse|PermissionRequest)$/.test(input.event) && (!string(input.payload.tool_name) || !("tool_input" in input.payload))) throw new Error("Codex tool hook payload is invalid");
+    if (input.event === "PermissionRequest" && input.request_id_kind !== "telemetry") throw new Error("Codex PermissionRequest needs a telemetry identity when no native request ID exists");
+    return;
+  }
   if (input.transport !== "opencode-plugin") throw new Error("OpenCode plugin transport is invalid");
   const info = object(input.payload.info); const nativeSessionId = string(input.payload.sessionID) ?? string(info.id);
   if (nativeSessionId !== input.session_id) throw new Error("OpenCode session ID does not match");
@@ -259,3 +277,18 @@ function validateVerifiedPayload(input: NativeHookEnvelope): void {
 function parseModel(value: string): { provider_id: string; model_id: string } { const [provider, ...model] = value.split("/"); return model.length ? { provider_id: provider!, model_id: model.join("/") } : { provider_id: "unknown", model_id: value }; }
 function safeJson(value: unknown): JsonValue | undefined { try { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)) as JsonValue; } catch { return undefined; } }
 function decodeAnswers(response: string, count: number): string[][] { try { const value = JSON.parse(response) as unknown; if (Array.isArray(value) && value.every((item) => Array.isArray(item) && item.every((answer) => typeof answer === "string"))) return Array.from({ length: count }, (_, index) => (value[index] as string[] | undefined) ?? []); if (count === 1 && Array.isArray(value) && value.every((item) => typeof item === "string")) return [value as string[]]; } catch {} return Array.from({ length: count }, (_, index) => index === 0 ? [response] : []); }
+
+function shouldClearTelemetryPending(input: NativeHookEnvelope, prior: ReturnType<SessionRegistry["get"]>): boolean {
+  const pending = prior?.pending; const metadata = object(prior?.metadata); const marker = object(metadata.hook_pending);
+  if (!pending?.read_only || metadata.transport !== "codex-hook-command" || input.event === "PermissionRequest") return false;
+  if (!(isToolStart(input.event) || isToolEnd(input.event) || /^(Stop|SessionEnd)$/.test(input.event))) return false;
+  const markedTool = string(marker.tool_use_id); const incomingTool = input.request_id ?? string(input.payload.tool_use_id);
+  if (markedTool && incomingTool) return markedTool === incomingTool;
+  const markedTurn = string(marker.turn_id); const incomingTurn = string(input.payload.turn_id);
+  return !markedTurn || !incomingTurn || markedTurn === incomingTurn;
+}
+
+function withCodexTelemetryIdentity(input: NativeHookEnvelope): NativeHookEnvelope {
+  const id = `codex-telemetry-${createHash("sha256").update(input.session_id).update("\0").update(String(input.payload.turn_id ?? "")).update("\0").update(String(input.payload.tool_name ?? "")).update("\0").update(JSON.stringify(input.payload.tool_input ?? null)).digest("hex").slice(0, 32)}`;
+  return { ...input, request_id: id, request_id_kind: "telemetry" };
+}
