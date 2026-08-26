@@ -6,7 +6,7 @@ import type { Credentials } from "./credentials.js";
 import { SessionRegistry } from "./registry.js";
 
 export interface CommandTarget { sendMessage(text: string): Promise<void>; respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void | Promise<void>; interrupt(): void | Promise<void> }
-interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[]; replay_delay_ms?: number; replay_interval_ms?: number }
+interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[]; replay_delay_ms?: number; replay_interval_ms?: number; heartbeat_interval_ms?: number }
 
 const SNAPSHOT_SESSION_LIMIT = 16;
 const REPLAY_LIMIT_PER_SESSION = 20;
@@ -15,7 +15,7 @@ const REPLAY_DELAY_MS = 5_000;
 // Transcript repair is deliberately slower than live state. The server applies
 // relay frames serially, so a fast replay can otherwise put a newly requested
 // approval or question behind minutes of database writes.
-const REPLAY_INTERVAL_MS = 1_000;
+const REPLAY_INTERVAL_MS = 15_000;
 
 function snapshotSessions(registry: SessionRegistry): Session[] {
   return registry.list().sort((left, right) => {
@@ -37,6 +37,7 @@ export class OutboundRelay extends EventEmitter {
   #attempt = 0;
   #queue: ClientToServerMessage[] = [];
   #externalToLocal = new Map<string, string>();
+  #capabilityFingerprints = new Map<string, string>();
 
   constructor(private readonly credentials: Credentials, private readonly registry: SessionRegistry, private readonly target: (id: string) => CommandTarget | undefined, private readonly options: RelayOptions = {}) {
     super();
@@ -68,18 +69,38 @@ export class OutboundRelay extends EventEmitter {
       const machine: Machine = { id: this.credentials.machine_id, name: this.credentials.machine_name, owner_account_id: this.credentials.owner_account_id, last_seen_at: now, status: "online" };
       socket.send(JSON.stringify({ type: "machine.hello", protocol_version: 1, machine } satisfies ClientToServerMessage));
       const sessions = snapshotSessions(this.registry);
-      for (const session of sessions) {
+      for (const session of sessions.filter((candidate) => candidate.pending)) {
         socket.send(JSON.stringify({ type: "session.upsert", session: this.#namespace(session) } satisfies ClientToServerMessage));
       }
-      for (const capabilities of this.options.capabilities?.() ?? []) socket.send(JSON.stringify({ type: "harness.capabilities", capabilities } satisfies ClientToServerMessage));
-      // Deliver live state that accumulated during reconnect before historical
-      // transcript repair. This keeps new pending requests actionable.
-      for (const message of this.#queue.splice(0)) socket.send(JSON.stringify(message));
+      this.#sendCapabilities(socket, true);
+      // Discovery can populate thousands of sessions before the first socket
+      // opens. Never replay that raw startup queue: snapshots and bounded repair
+      // already cover it, while flooding it can delay a new question by minutes.
+      // Preserve every pending item plus control results/removals that cannot be
+      // reconstructed from the registry.
+      const pending = new Map<string, ClientToServerMessage>(); const essential: ClientToServerMessage[] = [];
+      for (const message of this.#queue.splice(0)) {
+        if (message.type === "session.upsert") {
+          if (message.session.pending) pending.set(message.session.id, message);
+        } else if (message.type === "command.result" || message.type === "session.removed") essential.push(message);
+      }
+      for (const message of [...pending.values(), ...essential]) socket.send(JSON.stringify(message));
       // Repair transcript history after live state has had time to settle. One
       // frame per tick keeps new approvals and questions ahead of old events.
       this.#scheduleReplay(socket, sessions);
-      this.#heartbeat = setInterval(() => { this.send({ type: "machine.heartbeat", machine_id: machine.id, sent_at: new Date().toISOString() });
-        for (const capabilities of this.options.capabilities?.() ?? []) this.send({ type: "harness.capabilities", capabilities }); }, 15_000);
+      this.#heartbeat = setInterval(() => {
+        this.send({ type: "machine.heartbeat", machine_id: machine.id, sent_at: new Date().toISOString() });
+        // Hook-backed adapters become actionable only after the first native
+        // event arrives. Re-advertise a capability report when its semantics
+        // change so a read-only discovery report cannot remain authoritative
+        // for the lifetime of the relay connection.
+        this.#sendCapabilities(socket);
+        // A socket can appear open briefly while a proxy restart drops a frame.
+        // Pending state is tiny and time-sensitive, so re-announce it until the
+        // harness resolves it. This repairs a lost question without replaying
+        // the full session or transcript backlog.
+        for (const session of snapshotSessions(this.registry).filter((candidate) => candidate.pending)) this.send({ type: "session.upsert", session: this.#namespace(session) });
+      }, this.options.heartbeat_interval_ms ?? 15_000);
       this.#heartbeat.unref(); this.emit("online");
     });
     socket.on("message", (data) => void this.#command(data.toString()));
@@ -90,11 +111,27 @@ export class OutboundRelay extends EventEmitter {
     });
   }
 
+  #sendCapabilities(socket: WebSocket, force = false): void {
+    for (const capabilities of this.options.capabilities?.() ?? []) {
+      const { reported_at: _reportedAt, ...semantic } = capabilities;
+      const fingerprint = JSON.stringify(semantic);
+      if (!force && this.#capabilityFingerprints.get(capabilities.harness_type) === fingerprint) continue;
+      this.#capabilityFingerprints.set(capabilities.harness_type, fingerprint);
+      socket.send(JSON.stringify({ type: "harness.capabilities", capabilities } satisfies ClientToServerMessage));
+    }
+  }
+
   #scheduleReplay(socket: WebSocket, sessions: Session[]): void {
+    const snapshots = sessions.filter((session) => !session.pending); let snapshotOffset = 0;
     const replays = sessions.map((session) => ({ session, events: this.registry.transcriptTail(session.id, REPLAY_LIMIT_PER_SESSION), offset: 0 }));
     let cursor = 0; let sent = 0;
     const next = (): void => {
       if (this.#stopped || socket !== this.#socket || socket.readyState !== WebSocket.OPEN || sent >= REPLAY_EVENT_LIMIT) { this.#replay = undefined; return; }
+      const snapshot = snapshots[snapshotOffset++];
+      if (snapshot) {
+        socket.send(JSON.stringify({ type: "session.upsert", session: this.#namespace(snapshot) } satisfies ClientToServerMessage));
+        this.#replay = setTimeout(next, this.options.replay_interval_ms ?? REPLAY_INTERVAL_MS); this.#replay.unref(); return;
+      }
       let event: ReturnType<SessionRegistry["transcriptTail"]>[number] | undefined; let session: Session | undefined;
       for (let checked = 0; checked < replays.length; checked++) {
         const replay = replays[cursor++ % replays.length]!; const candidate = replay.events[replay.offset++];

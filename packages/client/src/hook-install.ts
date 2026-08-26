@@ -135,22 +135,29 @@ export const Rivetplane = async (ctx) => ({
     } catch {}
     if (!request_id || result.decision === "neutral") return;
     const nativeReply = async (path, requestID, body) => {
-      // Reuse the plugin client's in-process transport. OpenCode 1.14+ can keep
-      // pending questions in a different service tree from the TCP listener, so
-      // fetch(ctx.serverUrl) may return 404 while the TUI still owns the request.
+      // OpenCode currently gives plugins the legacy SDK client, while question
+      // and permission replies are generated only on its underlying transport.
+      // Use the real instance routes through that transport. Because ctx.client
+      // belongs to this TUI's embedded server, this reaches the exact Deferred
+      // which emitted the hook instead of a separately discovered serve process.
       const client = ctx.client?._client;
       if (!client?.post) throw new Error("OpenCode plugin client does not expose its native transport");
       const result = await client.post({ url: path, path: { requestID }, query: { directory: ctx.directory }, body, headers: { "content-type": "application/json" } });
-      if (result?.error !== undefined || (result?.data !== true && result !== true)) throw new Error("OpenCode native response was not accepted: " + JSON.stringify(result?.error ?? result));
+      if (result?.error !== undefined) throw new Error("OpenCode native response was not accepted: " + JSON.stringify(result.error));
+    };
+    const defer = (work) => {
+      // Let the question.asked listener return before resolving its native
+      // deferred. This also keeps the remote bridge independent of SDK latency.
+      setTimeout(() => void work().catch(() => undefined), 0);
     };
     if (event.type === "permission.asked") {
       const reply = result.decision === "deny" ? "reject" : result.scope && result.scope !== "once" ? "always" : "once";
-      await nativeReply("/permission/{requestID}/reply", request_id, { reply });
+      defer(() => nativeReply("/permission/{requestID}/reply", request_id, { reply }));
     } else if (event.type === "question.asked" && result.decision === "answer") {
       const count = Array.isArray(props.questions) ? props.questions.length : 1;
       const supplied = result.updated_input?.answers;
       const answers = Array.isArray(supplied) ? Array.from({ length: count }, (_, index) => Array.isArray(supplied[index]) ? supplied[index] : []) : Array.from({ length: count }, (_, index) => index === 0 ? [result.response || ""] : []);
-      await nativeReply("/question/{requestID}/reply", request_id, { answers });
+      defer(() => nativeReply("/question/{requestID}/reply", request_id, { answers }));
     }
   },
 });

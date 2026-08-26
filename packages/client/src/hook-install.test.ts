@@ -97,20 +97,19 @@ test("runs the generated OpenCode plugin with exact owner, payload, and answer a
   const priorBun = (globalThis as { Bun?: unknown }).Bun;
   (globalThis as { Bun?: unknown }).Bun = { spawn(command: string[]) { commands.push(command); return { stdin: { write(value: string) { writes.push(value); }, end() {} }, stdout: JSON.stringify(bridge), exited: Promise.resolve(0) }; } };
   const nativeRequests: Array<Record<string, unknown>> = [];
-  const questionReplies: unknown[] = []; const permissionReplies: unknown[] = [];
   try {
     const plugin = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}`) as { Rivetplane(context: unknown): Promise<{ event(input: unknown): Promise<void> }> };
-    const hook = await plugin.Rivetplane({ directory: "/repo", serverUrl: new URL("http://127.0.0.1:4096"), client: { _client: { post(input: Record<string, unknown>) { nativeRequests.push(input); return { data: true }; } }, question: { reply(input: unknown) { questionReplies.push(input); } }, permission: { reply(input: unknown) { permissionReplies.push(input); } } } });
+    const hook = await plugin.Rivetplane({ directory: "/repo", serverUrl: new URL("http://127.0.0.1:4096"), client: { _client: { post(input: Record<string, unknown>) { nativeRequests.push(input); return {}; } } } });
     const question = JSON.parse(await readFile(join(process.cwd(), "src", "fixtures", "hooks", "opencode", "question-asked.json"), "utf8"));
     await hook.event({ event: question });
-    assert.deepEqual(questionReplies, []);
+    assert.equal(nativeRequests.length, 0); await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(nativeRequests[0]?.url, "/question/{requestID}/reply");
     assert.deepEqual(nativeRequests[0]?.path, { requestID: "question-full" });
     assert.deepEqual(nativeRequests[0]?.query, { directory: "/repo" });
     assert.deepEqual(nativeRequests[0]?.body, { answers: [["Safe"], ["Tests", "Lint"]] });
     assert.deepEqual(JSON.parse(writes[0]!), question.properties); assert.equal(commands[0]?.[0], process.execPath); assert.equal(commands[0]?.[1], defaultHookBridgePath({}, home)); assert.equal(commands[0]?.includes("--owner"), true); assert.equal(commands[0]?.includes("rivetplane-hook-v1"), true);
-    bridge = { decision: "answer", updated_input: { answers: [["free text"], []] } }; await hook.event({ event: question });
-    assert.deepEqual(nativeRequests[1]?.body, { answers: [["free text"], []] }); assert.equal(permissionReplies.length, 0);
+    bridge = { decision: "answer", updated_input: { answers: [["free text"], []] } }; await hook.event({ event: question }); await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(nativeRequests[1]?.body, { answers: [["free text"], []] });
   } finally { (globalThis as { Bun?: unknown }).Bun = priorBun; }
 });
 

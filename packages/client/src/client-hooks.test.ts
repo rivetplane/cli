@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { aggregateHarnessStatuses, HarnessControlClient } from "./client.js";
+import { aggregateHarnessStatuses, HarnessControlClient, selectCommandTarget } from "./client.js";
 import { toHookEnvelope } from "./hook-bridge.js";
 
 test("includes hook-discovered harnesses in the local roster and capability summary", async () => {
@@ -22,4 +22,12 @@ test("counts unique sessions across overlapping rosters and keeps live capabilit
     { harness_type: "codex", discovered_sessions: 2, attached_sessions: 0, discovered_session_ids: ["shared", "rollout-only"], attached_session_ids: [], capabilities: rollout },
   ]);
   assert.deepEqual(statuses, [{ harness_type: "codex", discovered_sessions: 3, attached_sessions: 2, capabilities: live }]);
+});
+
+test("routes a command to an exact live waiter before a read-only compatibility adapter", () => {
+  const calls: string[] = [];
+  const readOnly = { sendMessage: async () => {}, respondToPending: async () => { calls.push("read-only"); }, interrupt: async () => {} };
+  const live = { sendMessage: async () => {}, respondToPending: async () => { calls.push("live"); }, interrupt: async () => {} };
+  const target = selectCommandTarget("shared-session", [() => undefined, () => live, () => readOnly]);
+  assert.equal(target, live);
 });

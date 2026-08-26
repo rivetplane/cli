@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { Credentials } from "./credentials.js";
 import { LocalApi } from "./local-api.js";
-import { OutboundRelay } from "./relay.js";
+import { OutboundRelay, type CommandTarget } from "./relay.js";
 import { SessionManager } from "./session-manager.js";
 import { OpenCodeManager } from "./opencode-manager.js";
 import { OpenCodeExportDiscovery } from "./opencode-export-discovery.js";
@@ -84,7 +84,20 @@ export class HarnessControlClient {
       ...(options.claude_executable ? { executable: options.claude_executable } : {}), ...(options.claude_config_dir ? { config_dir: options.claude_config_dir } : {}),
       ...(options.claude_checkpoint_path ? { checkpoint_path: options.claude_checkpoint_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });
-    const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.codex_app_server?.target(id) ?? this.hooks.target(id) ?? this.opencode_exports?.target(id) ?? this.codex_rollouts?.target(id) ?? this.claude_code?.target(id);
+    // A standalone TUI and the auto-started OpenCode serve adapter can expose
+    // the same database-backed session. Only the live hook owns that TUI's
+    // exact question Deferred, so prefer it over the compatibility adapter.
+    // Managed OpenCode remains authoritative because it suppresses duplicate
+    // hook targets via setAuthoritativeTarget above.
+    const target = (id: string) => selectCommandTarget(id, [
+      (value) => this.manager.target(value),
+      (value) => this.codex_app_server?.target(value),
+      (value) => this.hooks.target(value),
+      (value) => this.opencode?.target(value),
+      (value) => this.opencode_exports?.target(value),
+      (value) => this.codex_rollouts?.target(value),
+      (value) => this.claude_code?.target(value),
+    ]);
     this.local_api = new LocalApi(this.manager.registry, { port: options.local_port ?? 41737, target,
       harnesses: () => this.harnesses(), discovery_directory: this.manager.discovery.directory, hooks: this.hooks, ...(options.hook_discovery_path ? { hook_discovery_path: options.hook_discovery_path } : {}) });
     if (options.credentials && options.relay !== false) this.relay = new OutboundRelay(options.credentials, this.manager.registry, target, {
@@ -110,6 +123,11 @@ export class HarnessControlClient {
   harnesses() {
     return aggregateHarnessStatuses([...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.claude_code?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? []), ...this.hooks.harnesses()]);
   }
+}
+
+export function selectCommandTarget(id: string, sources: Array<(id: string) => CommandTarget | undefined>): CommandTarget | undefined {
+  for (const source of sources) { const target = source(id); if (target) return target; }
+  return undefined;
 }
 
 function capabilityRank(item: HarnessDiscoveryStatus): number {
