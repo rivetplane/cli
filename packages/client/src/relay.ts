@@ -10,9 +10,12 @@ interface RelayOptions { createSession?: (command: CreateSessionCommand) => Prom
 
 const SNAPSHOT_SESSION_LIMIT = 16;
 const REPLAY_LIMIT_PER_SESSION = 20;
-const REPLAY_EVENT_LIMIT = 200;
+const REPLAY_EVENT_LIMIT = 40;
 const REPLAY_DELAY_MS = 5_000;
-const REPLAY_INTERVAL_MS = 50;
+// Transcript repair is deliberately slower than live state. The server applies
+// relay frames serially, so a fast replay can otherwise put a newly requested
+// approval or question behind minutes of database writes.
+const REPLAY_INTERVAL_MS = 1_000;
 
 function snapshotSessions(registry: SessionRegistry): Session[] {
   return registry.list().sort((left, right) => {

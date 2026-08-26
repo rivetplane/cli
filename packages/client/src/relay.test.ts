@@ -68,6 +68,23 @@ test("sends recent snapshots and capabilities before bounded round-robin replay"
   } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
+test("keeps live pending state ahead of default transcript repair", async () => {
+  const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
+  wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+  const registry = new SessionRegistry(); const now = new Date().toISOString();
+  registry.upsert({ id: "s1", machine_id: "m1", harness_type: "opencode", cwd: "/tmp", status: "running", created_at: now, last_activity_at: now, pending: null });
+  registry.append("s1", "agent_message", { text: "repair-1" }); registry.append("s1", "agent_message", { text: "repair-2" });
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined, { replay_delay_ms: 0 });
+  try {
+    relay.start(); await until(() => received.filter((message) => message.type === "transcript.append").length === 1);
+    registry.setPending("s1", { type: "question", id: "q-live", session_id: "s1", prompt: "Continue?", requested_at: new Date().toISOString() });
+    await until(() => received.some((message) => message.type === "session.upsert" && (message.session as { pending?: { id?: string } }).pending?.id === "q-live"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(received.filter((message) => message.type === "transcript.append").length, 1);
+  } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
 test("caps reconnect snapshots and sends pending sessions first", async () => {
   const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
   wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
