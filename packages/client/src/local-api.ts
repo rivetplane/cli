@@ -5,8 +5,9 @@ import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
 import type { HookIngestor } from "./hook-ingestion.js";
+import { createHookToken, defaultHookDiscoveryPath, HOOK_OWNER, removeHookDiscovery, secretEquals, writeHookDiscovery } from "./hook-discovery.js";
 
-interface LocalApiOptions { port?: number; host?: "127.0.0.1" | "::1"; target(id: string): CommandTarget | undefined; harnesses?: () => HarnessDiscoveryStatus[]; discovery_directory?: string; hooks?: HookIngestor }
+interface LocalApiOptions { port?: number; host?: "127.0.0.1" | "::1"; target(id: string): CommandTarget | undefined; harnesses?: () => HarnessDiscoveryStatus[]; discovery_directory?: string; hooks?: HookIngestor; hook_discovery_path?: string; hook_token?: string }
 
 function send(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(`${JSON.stringify(value)}\n`);
@@ -20,6 +21,8 @@ export class LocalApi {
   #clients = new Set<WebSocket>();
   #server = createServer((request, response) => void this.#handle(request, response));
   #websockets = new WebSocketServer({ noServer: true });
+  #hookToken: string | undefined;
+  #hookDiscoveryPath: string | undefined;
   constructor(private readonly registry: SessionRegistry, private readonly options: LocalApiOptions) {
     this.#server.on("upgrade", (request, socket, head) => {
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -37,9 +40,25 @@ export class LocalApi {
 
   async start(): Promise<number> {
     await new Promise<void>((resolve, reject) => { this.#server.once("error", reject); this.#server.listen(this.options.port ?? 0, this.options.host ?? "127.0.0.1", resolve); });
-    return (this.#server.address() as AddressInfo).port;
+    const port = (this.#server.address() as AddressInfo).port;
+    if (this.options.hooks) {
+      this.#hookToken = this.options.hook_token ?? createHookToken();
+      this.#hookDiscoveryPath = this.options.hook_discovery_path ?? defaultHookDiscoveryPath();
+      try {
+        await writeHookDiscovery(this.#hookDiscoveryPath, { version: 1, owner: HOOK_OWNER, endpoint: `http://127.0.0.1:${port}/v1/hooks/events`, token: this.#hookToken, pid: process.pid, started_at: new Date().toISOString() });
+      } catch (error) {
+        await new Promise<void>((resolve) => this.#server.close(() => resolve()));
+        throw error;
+      }
+    }
+    return port;
   }
-  async stop(): Promise<void> { for (const client of this.#clients) client.close(); await new Promise<void>((resolve, reject) => this.#server.close((error) => error ? reject(error) : resolve())); }
+  async stop(): Promise<void> {
+    for (const client of this.#clients) client.close();
+    this.options.hooks?.stop();
+    if (this.#hookDiscoveryPath && this.#hookToken) await removeHookDiscovery(this.#hookDiscoveryPath, this.#hookToken);
+    await new Promise<void>((resolve, reject) => this.#server.close((error) => error ? reject(error) : resolve()));
+  }
 
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
@@ -47,6 +66,7 @@ export class LocalApi {
       const method = request.method ?? "GET";
       if (method === "POST" && url.pathname === "/v1/hooks/events") {
         if (!this.options.hooks) { send(response, 404, { error: "Hook ingestion is disabled" }); return; }
+        if (request.headers["x-rivetplane-hook-owner"] !== HOOK_OWNER || !this.#hookToken || !secretEquals(request.headers["x-rivetplane-hook-token"], this.#hookToken)) { send(response, 401, { error: "Hook ownership or token is invalid" }); return; }
         send(response, 200, await this.options.hooks.ingest(await body(request))); return;
       }
       if (method === "GET" && url.pathname === "/v1/harnesses") {

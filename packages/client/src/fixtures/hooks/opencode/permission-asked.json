@@ -1,0 +1,12 @@
+{
+  "id": "event-permission-full",
+  "type": "permission.asked",
+  "properties": {
+    "id": "permission-full",
+    "sessionID": "opencode-session-full",
+    "permission": "bash",
+    "patterns": ["bun test"],
+    "metadata": {},
+    "always": ["bun test*"]
+  }
+}

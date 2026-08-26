@@ -17,6 +17,7 @@ export interface ClientOptions {
   discovery_directory?: string;
   discovery_interval_ms?: number;
   local_port?: number;
+  hook_discovery_path?: string;
   relay?: boolean;
   opencode_url?: string | false;
   opencode_managed?: boolean;
@@ -58,6 +59,7 @@ export class HarnessControlClient {
     this.manager = new SessionManager(machineId, { ...(options.discovery_directory ? { directory: options.discovery_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
     this.hooks = new HookIngestor(machineId, this.manager.registry);
     if (typeof options.opencode_url === "string" || options.opencode_managed) this.opencode = new OpenCodeManager(machineId, this.manager.registry, { ...(typeof options.opencode_url === "string" ? { url: options.opencode_url } : {}), ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
+    this.hooks.setAuthoritativeTarget((harness, id) => harness === "opencode" && Boolean(this.opencode?.target(id)));
     const exportEnabled = options.opencode_export ?? (!options.opencode_managed && typeof options.opencode_url !== "string");
     if (options.opencode_url !== false && exportEnabled) this.opencode_exports = new OpenCodeExportDiscovery(machineId, this.manager.registry, {
       ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.opencode_executable ? { executable: options.opencode_executable } : {}),
@@ -81,7 +83,7 @@ export class HarnessControlClient {
     });
     const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.codex_app_server?.target(id) ?? this.hooks.target(id) ?? this.opencode_exports?.target(id) ?? this.codex_rollouts?.target(id) ?? this.claude_code?.target(id);
     this.local_api = new LocalApi(this.manager.registry, { port: options.local_port ?? 41737, target,
-      harnesses: () => this.harnesses(), discovery_directory: this.manager.discovery.directory, hooks: this.hooks });
+      harnesses: () => this.harnesses(), discovery_directory: this.manager.discovery.directory, hooks: this.hooks, ...(options.hook_discovery_path ? { hook_discovery_path: options.hook_discovery_path } : {}) });
     if (options.credentials && options.relay !== false) this.relay = new OutboundRelay(options.credentials, this.manager.registry, target, {
       createSession: async (command) => {
         if (command.harness_type === "opencode" && this.opencode) return this.opencode.createSession(command);
@@ -103,7 +105,7 @@ export class HarnessControlClient {
   }
   harnesses() {
     const result = new Map<string, ReturnType<SessionManager["harnesses"]>[number]>();
-    for (const item of [...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.claude_code?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? [])]) {
+    for (const item of [...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.claude_code?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? []), ...this.hooks.harnesses()]) {
       const prior = result.get(item.harness_type); result.set(item.harness_type, prior ? { ...prior, ...item, discovered_sessions: prior.discovered_sessions + item.discovered_sessions, attached_sessions: prior.attached_sessions + item.attached_sessions } : item);
     }
     return [...result.values()];

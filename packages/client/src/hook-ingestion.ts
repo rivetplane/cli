@@ -37,6 +37,10 @@ const ACTIONABLE_EVENTS: Record<string, Set<string>> = {
   "claude-code": new Set(["PermissionRequest", "AskUserQuestion"]),
   opencode: new Set(["permission.asked", "question.asked"]),
 };
+const VERIFIED_EVENTS: Record<string, Set<string>> = {
+  "claude-code": new Set(["PermissionRequest", "PreToolUse", "AskUserQuestion", "PostToolUse", "Stop", "SessionEnd"]),
+  opencode: new Set(["session.created", "session.updated", "session.status", "session.idle", "session.deleted", "session.error", "permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"]),
+};
 
 function string(value: unknown): string | undefined { return typeof value === "string" && value.length > 0 ? value : undefined; }
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
@@ -73,9 +77,16 @@ export class HookIngestor {
   #targets = new Set<string>();
   #cursors = new Map<string, number>();
   #harnesses = new Map<string, { cwd: string; transport: string; mode: HookActionMode }>();
+  #authoritativeTarget: (harness: string, sessionId: string) => boolean = () => false;
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly wait_ms = DEFAULT_HOOK_WAIT_MS) {}
 
   target(id: string): CommandTarget | undefined { return this.#targets.has(id) ? new HookTarget(this, id) : undefined; }
+  setAuthoritativeTarget(check: (harness: string, sessionId: string) => boolean): void { this.#authoritativeTarget = check; }
+  harnesses(): Array<{ harness_type: string; discovered_sessions: number; attached_sessions: number }> {
+    const counts = new Map<string, number>();
+    for (const session of this.registry.list()) if (this.#harnesses.has(session.harness_type) && session.metadata && object(session.metadata).transport === this.#harnesses.get(session.harness_type)?.transport) counts.set(session.harness_type, (counts.get(session.harness_type) ?? 0) + 1);
+    return [...this.#harnesses.keys()].map((harness_type) => ({ harness_type, discovered_sessions: counts.get(harness_type) ?? 0, attached_sessions: counts.get(harness_type) ?? 0 }));
+  }
   capabilities(): HarnessCapabilities[] {
     return [...this.#harnesses].map(([harness, state]) => {
       const actionable = state.mode === "actionable"; const telemetry = state.mode !== "lifecycle";
@@ -93,7 +104,7 @@ export class HookIngestor {
 
   async ingest(raw: unknown): Promise<HookBridgeResult> {
     let input = validateHookEnvelope(raw);
-    if (input.harness === "campfire" && string(input.payload.role) && string(input.payload.role) !== "host") return { decision: "neutral" };
+    validateVerifiedPayload(input);
     if (input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion") input = { ...input, event: "AskUserQuestion" };
     const id = input.session_id; const ts = timestamp(input.timestamp); const mode = eventMode(input);
     const priorHarness = this.#harnesses.get(input.harness); const rank = (value: HookActionMode): number => value === "actionable" ? 3 : value === "telemetry" ? 2 : 1;
@@ -130,43 +141,68 @@ export class HookIngestor {
 
     const pending = this.#pending(input, ts);
     if (!pending) {
-      if (isResolution(input.event) && (!input.request_id || prior?.pending?.id === input.request_id)) this.registry.setPending(id, null);
+      if (isResolution(input.event) && input.request_id) this.#settle(id, input.request_id, { decision: "neutral" }, true);
       return { decision: "neutral" };
     }
+    if (this.#authoritativeTarget(input.harness, id)) return { decision: "neutral" };
     this.registry.setPending(id, pending);
     this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
     if (pending.type === "approval") this.registry.append(id, "permission_request", { approval_id: pending.id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary }, idempotency);
     if (mode !== "actionable") return { decision: "neutral" };
     this.#targets.add(id);
     return new Promise<HookBridgeResult>((resolve) => {
-      const timer = setTimeout(() => { this.#waiters.delete(pending.id); resolve({ decision: "neutral" }); }, this.wait_ms);
-      timer.unref(); this.#waiters.set(pending.id, { session_id: id, pending_id: pending.id, resolve, timer });
+      const key = waiterKey(id, pending.id); const replaced = this.#waiters.get(key);
+      if (replaced) { clearTimeout(replaced.timer); replaced.resolve({ decision: "neutral" }); }
+      const waiter = { session_id: id, pending_id: pending.id, resolve, timer: undefined as unknown as NodeJS.Timeout };
+      waiter.timer = setTimeout(() => { if (this.#waiters.get(key) === waiter) this.#settle(id, pending.id, { decision: "neutral" }, true); }, this.wait_ms);
+      waiter.timer.unref(); this.#waiters.set(key, waiter);
     });
   }
 
   respond(sessionId: string, pendingId: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void {
-    const waiter = this.#waiters.get(pendingId); const pending = this.registry.get(sessionId)?.pending;
+    const waiter = this.#waiters.get(waiterKey(sessionId, pendingId)); const pending = this.registry.get(sessionId)?.pending;
     if (!waiter || waiter.session_id !== sessionId || !pending || pending.id !== pendingId) throw new Error(`Pending interaction ${pendingId} is no longer active`);
-    clearTimeout(waiter.timer); this.#waiters.delete(pendingId); this.registry.setPending(sessionId, null); this.registry.setStatus(sessionId, "running");
+    clearTimeout(waiter.timer); this.#waiters.delete(waiterKey(sessionId, pendingId)); this.#removeTargetIfIdle(sessionId); this.registry.setPending(sessionId, null); this.registry.setStatus(sessionId, "running");
     if (pending.type === "approval") {
       const decision = response === "deny" ? "deny" : "approve";
       this.registry.append(sessionId, "permission_response", { approval_id: pendingId, resolution: decision, ...(scope ? { scope } : {}) });
       waiter.resolve({ decision, ...(scope ? { scope } : {}) });
-    } else waiter.resolve({ decision: "answer", response, updated_input: { answers: decodeAnswers(response, pending.questions?.length ?? 1) } });
+    } else {
+      const answers = decodeAnswers(response, pending.questions?.length ?? 1);
+      const nativeAnswers = this.registry.get(sessionId)?.harness_type === "claude-code" ? Object.fromEntries((pending.questions ?? []).map((question, index) => [question.prompt, answers[index]?.join(", ") ?? ""])) : answers;
+      waiter.resolve({ decision: "answer", response, updated_input: { answers: nativeAnswers } });
+    }
+  }
+
+  stop(): void {
+    for (const waiter of [...this.#waiters.values()]) this.#settle(waiter.session_id, waiter.pending_id, { decision: "neutral" }, true);
+    this.#targets.clear(); this.#cursors.clear();
+  }
+
+  #settle(sessionId: string, pendingId: string, result: HookBridgeResult, clearPending: boolean): void {
+    const key = waiterKey(sessionId, pendingId); const waiter = this.#waiters.get(key);
+    if (waiter) { clearTimeout(waiter.timer); this.#waiters.delete(key); waiter.resolve(result); }
+    const pending = this.registry.get(sessionId)?.pending;
+    if (clearPending && pending?.id === pendingId) { this.registry.setPending(sessionId, null); this.registry.setStatus(sessionId, "waiting_input"); }
+    this.#removeTargetIfIdle(sessionId);
+  }
+
+  #removeTargetIfIdle(sessionId: string): void {
+    if (![...this.#waiters.values()].some((waiter) => waiter.session_id === sessionId)) this.#targets.delete(sessionId);
   }
 
   #pending(input: NativeHookEnvelope, ts: string): PendingInteraction | undefined {
     const requestId = input.request_id ?? string(input.payload.request_id) ?? string(input.payload.permission_request_id) ?? string(input.payload.tool_use_id) ?? string(input.payload.tool_call_id);
     if (!requestId) return undefined;
-    if (/permission/i.test(input.event)) return { type: "approval", id: requestId, session_id: input.session_id,
-      tool_name: string(input.payload.tool_name) ?? "tool", tool_input_summary: summary(input.payload.tool_input), requested_at: ts, read_only: eventMode(input) !== "actionable" };
-    if (/askuserquestion|question\.asked/i.test(input.event)) {
+    if (input.event === "PermissionRequest" || input.event === "permission.asked") return { type: "approval", id: requestId, session_id: input.session_id,
+      tool_name: string(input.payload.tool_name) ?? string(input.payload.permission) ?? "tool", tool_input_summary: summary(input.payload.tool_input ?? input.payload.patterns), requested_at: ts, read_only: eventMode(input) !== "actionable" };
+    if (/^(AskUserQuestion|question\.asked)$/i.test(input.event)) {
       const toolInput = object(input.payload.tool_input);
       const rawQuestions = Array.isArray(input.payload.questions) ? input.payload.questions : Array.isArray(toolInput.questions) ? toolInput.questions : [];
       const questions = rawQuestions.map((value) => object(value));
       const normalized = questions.map((question) => ({ prompt: string(question.question) ?? string(question.prompt) ?? "Question", header: string(question.header) ?? "Question",
         options: Array.isArray(question.options) ? question.options.map((option) => { const item = object(option); return { label: string(item.label) ?? String(option), ...(string(item.description) ? { description: item.description as string } : {}) }; }) : [],
-        ...(typeof question.multiSelect === "boolean" ? { multiple: question.multiSelect } : {}), custom: true }));
+        ...(typeof question.multiSelect === "boolean" ? { multiple: question.multiSelect } : typeof question.multiple === "boolean" ? { multiple: question.multiple } : {}), custom: true }));
       return { type: "question", id: requestId, session_id: input.session_id, prompt: normalized.map((item) => item.prompt).join("\n") || string(input.payload.prompt) || "Question",
         options: normalized.flatMap((item) => item.options.map((option) => option.label)), questions: normalized, tool_call_id: string(input.payload.tool_use_id), requested_at: ts,
         read_only: eventMode(input) !== "actionable" };
@@ -176,7 +212,8 @@ export class HookIngestor {
 
   #status(event: string, prior: SessionStatus | undefined): SessionStatus {
     if (/error|failure/i.test(event)) return "error";
-    if (/SessionEnd|Stop|session\.idle|session\.ended/i.test(event)) return "completed";
+    if (/^(SessionEnd|session\.deleted)$/i.test(event)) return "completed";
+    if (/^(Stop|session\.idle)$/i.test(event)) return "waiting_input";
     if (/Notification/i.test(event)) return prior ?? "waiting_input";
     return "running";
   }
@@ -192,6 +229,33 @@ class HookTarget implements CommandTarget {
 function isToolStart(event: string): boolean { return /^(PreToolUse|beforeShellExecution|BeforeTool|preToolUse|tool_execution_start)$/i.test(event); }
 function isToolEnd(event: string): boolean { return /^(PostToolUse|PostToolUseFailure|AfterTool|postToolUse|tool_execution_end)$/i.test(event); }
 function isResolution(event: string): boolean { return /replied|resolved|rejected|cancelled/i.test(event); }
+function waiterKey(sessionId: string, pendingId: string): string { return `${sessionId}\0${pendingId}`; }
+
+function validateVerifiedPayload(input: NativeHookEnvelope): void {
+  if (!VERIFIED_EVENTS[input.harness]?.has(input.event)) throw new Error(`Harness hook interface is unsupported: ${input.harness}/${input.event}`);
+  if (input.harness === "claude-code") {
+    if (input.transport !== "claude-code-hook-command") throw new Error("Claude hook transport is invalid");
+    if (input.payload.session_id !== input.session_id || input.payload.cwd !== input.cwd || input.payload.hook_event_name !== input.event) throw new Error("Claude hook identity does not match its official payload");
+    if (/^(PreToolUse|PostToolUse|PermissionRequest)$/.test(input.event) && (!string(input.payload.tool_name) || !input.payload.tool_input || typeof input.payload.tool_input !== "object")) throw new Error("Claude tool hook payload is invalid");
+    if (/^(PreToolUse|PostToolUse)$/.test(input.event) && string(input.payload.tool_use_id) !== input.request_id) throw new Error("Claude tool-use ID does not match");
+    if (input.event === "PermissionRequest" && (!input.request_id || !input.request_id.startsWith("rivetplane-"))) throw new Error("Claude PermissionRequest needs a Rivetplane bridge ID");
+    return;
+  }
+  if (input.transport !== "opencode-plugin") throw new Error("OpenCode plugin transport is invalid");
+  const info = object(input.payload.info); const nativeSessionId = string(input.payload.sessionID) ?? string(info.id);
+  if (nativeSessionId !== input.session_id) throw new Error("OpenCode session ID does not match");
+  const nativeRequestId = string(input.payload.id) ?? string(input.payload.requestID);
+  if ((/permission|question/.test(input.event)) && nativeRequestId !== input.request_id) throw new Error("OpenCode request ID does not match");
+  if (input.event === "question.asked") {
+    if (!Array.isArray(input.payload.questions) || input.payload.questions.length === 0) throw new Error("OpenCode question payload is invalid");
+    for (const raw of input.payload.questions) {
+      const question = object(raw);
+      if (!string(question.header) || !string(question.question) || !Array.isArray(question.options)) throw new Error("OpenCode question shape is invalid");
+      for (const rawOption of question.options) if (!string(object(rawOption).label)) throw new Error("OpenCode question option is invalid");
+    }
+  }
+  if (input.event === "permission.asked" && (!string(input.payload.permission) || !Array.isArray(input.payload.patterns))) throw new Error("OpenCode permission payload is invalid");
+}
 function parseModel(value: string): { provider_id: string; model_id: string } { const [provider, ...model] = value.split("/"); return model.length ? { provider_id: provider!, model_id: model.join("/") } : { provider_id: "unknown", model_id: value }; }
 function safeJson(value: unknown): JsonValue | undefined { try { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)) as JsonValue; } catch { return undefined; } }
 function decodeAnswers(response: string, count: number): string[][] { try { const value = JSON.parse(response) as unknown; if (Array.isArray(value) && value.every((item) => Array.isArray(item) && item.every((answer) => typeof answer === "string"))) return Array.from({ length: count }, (_, index) => (value[index] as string[] | undefined) ?? []); if (count === 1 && Array.isArray(value) && value.every((item) => typeof item === "string")) return [value as string[]]; } catch {} return Array.from({ length: count }, (_, index) => index === 0 ? [response] : []); }

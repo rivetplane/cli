@@ -15,14 +15,14 @@ The login command uses `https://rivetplane.com`, opens Rivetplane in your browse
 
 ## Event-driven hooks
 
-Rivetplane can install native hook or plugin bridges for harness binaries that are present:
+Rivetplane installs only the two native interfaces that have checked official configuration and event fixtures: Claude Code hooks and an OpenCode plugin. All other matrix entries are reported as unsupported and are not installed.
 
 ```sh
 npx rivetplane hooks install
 npx rivetplane hooks install --harness claude-code
 ```
 
-The installer prints a result for each harness. It skips a missing binary. It changes only marked Rivetplane entries or files and keeps unrelated user settings. It refuses to replace an unmarked standalone plugin or extension file.
+The installer prints a result for each harness. It skips a missing supported binary. It changes only marked Rivetplane entries or files and keeps unrelated user settings. It refuses to replace an unmarked standalone plugin file or a symbolic-link target.
 
 To remove the bridges:
 
@@ -31,9 +31,11 @@ npx rivetplane hooks uninstall
 npx rivetplane hooks uninstall --harness opencode
 ```
 
-Set `RIVETPLANE_HOOKS_DISABLED=1` in one harness process to disable the bridge for that process. Set `RIVETPLANE_HOOK_ENDPOINT` only when the local API uses a non-default loopback port. A blocking bridge waits for about 120 seconds. It returns a neutral result after a timeout, so the native prompt stays available.
+Set `RIVETPLANE_HOOKS_DISABLED=1` in one harness process to disable the bridge for that process. A blocking bridge waits for about 120 seconds. It returns a neutral result after a timeout, so the native prompt stays available.
 
-Codex hooks are telemetry-only. Approval, question, message, and interrupt actions use only the supported Codex app-server. OpenCode live HTTP/SSE and plugin sessions report messages, interrupt, approval response, and question response. A read-only export record cannot replace these live capabilities.
+The client writes a private hook discovery and secret file at `~/.config/harness-cp/hook-endpoint.json`. Global hooks use it to find the current loopback port, including a custom port or port `0`. Each hook POST must have the Rivetplane owner marker and secret. Stale process records, unsafe file ownership or permissions, symbolic links, and non-loopback endpoints are rejected.
+
+Codex hook installation is unsupported. Approval, question, message, and interrupt actions use only the supported Codex app-server. OpenCode live HTTP/SSE supports messages, interrupt, approval response, and question response. The OpenCode plugin supports exact permission and question replies when HTTP/SSE does not own the session. A read-only export record cannot replace live capabilities.
 
 See the [checked harness capability matrix](docs/harness-capabilities.md) for exact support and official interface links.
 

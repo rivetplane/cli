@@ -46,9 +46,9 @@ async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) { process.stdout.write(`${HELP}\n`); return; }
   if (process.argv.includes("--version") || process.argv.includes("-v")) { process.stdout.write(`${version}\n`); return; }
   if (process.argv[2] === "hook" && process.argv[3] === "emit") {
-    const harness = flag("--harness"); const event = flag("--event");
-    if (!harness || !event) throw new Error("--harness and --event are required");
-    process.stdout.write(`${JSON.stringify(await emitHook(harness, event))}\n`); return;
+    const harness = flag("--harness"); const event = flag("--event"); const owner = flag("--owner");
+    if (!harness || !event || !owner) throw new Error("--owner, --harness, and --event are required");
+    process.stdout.write(`${JSON.stringify(await emitHook(harness, event, { owner }))}\n`); return;
   }
   if (process.argv[2] === "hooks" && (process.argv[3] === "install" || process.argv[3] === "uninstall")) {
     const harness = flag("--harness"); const results = process.argv[3] === "install" ? await installHooks({ ...(harness ? { only: [harness] } : {}) }) : await uninstallHooks({ ...(harness ? { only: [harness] } : {}) });
@@ -88,6 +88,7 @@ async function main(): Promise<void> {
     ...(credentials ? { credentials } : {}),
     ...(discoveryDirectory ? { discovery_directory: discoveryDirectory } : {}),
     local_port: localPort,
+    hook_discovery_path: process.env.RIVETPLANE_HOOK_DISCOVERY,
     relay: !process.argv.includes("--no-relay"),
     opencode_url: process.argv.includes("--no-opencode") ? false : (flag("--opencode-url") ?? process.env.HARNESS_CP_OPENCODE_URL),
     opencode_managed: explicitOpenCode,
@@ -150,7 +151,7 @@ async function main(): Promise<void> {
     if (claudeOptions.includes("--settings")) throw new Error("Do not pass --settings to the Rivetplane Claude wrapper");
     const settingsDirectory = await mkdtemp(join(tmpdir(), "rivetplane-claude-")); const settingsPath = join(settingsDirectory, "settings.json");
     await writeFile(settingsPath, `${JSON.stringify(claudeHookSettings(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    attachedProcess = spawn(flag("--claude-executable") ?? process.env.HARNESS_CP_CLAUDE_EXECUTABLE ?? "claude", ["--settings", settingsPath, ...claudeOptions], { cwd: process.cwd(), stdio: "inherit", env: { ...process.env, RIVETPLANE_HOOK_ENDPOINT: `http://127.0.0.1:${started.local_port}/v1/hooks/events` } });
+    attachedProcess = spawn(flag("--claude-executable") ?? process.env.HARNESS_CP_CLAUDE_EXECUTABLE ?? "claude", ["--settings", settingsPath, ...claudeOptions], { cwd: process.cwd(), stdio: "inherit", env: { ...process.env } });
     const exitCode = await new Promise<number>((resolve, reject) => { attachedProcess?.once("error", reject); attachedProcess?.once("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0))); });
     await client.stop(); await rm(settingsDirectory, { recursive: true, force: true }); process.exitCode = exitCode;
   }

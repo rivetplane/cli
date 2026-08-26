@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness claude-code --event PermissionRequest", "timeout": 125 }] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness claude-code --event PreToolUse", "timeout": 125 }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness claude-code --event PostToolUse", "timeout": 125 }] }],
+    "Stop": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness claude-code --event Stop", "timeout": 125 }] }],
+    "SessionEnd": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "rivetplane hook emit --owner rivetplane-hook-v1 --harness claude-code --event SessionEnd", "timeout": 125 }] }]
+  }
+}

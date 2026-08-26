@@ -23,4 +23,10 @@ Rivetplane also reads up to 48 Codex rollout files updated in the last 24 hours 
 
 Run `npx rivetplane --help` for all options.
 
+## Verified hook installation
+
+`npx rivetplane hooks install` installs only checked Claude Code and OpenCode interfaces. Other harness names are reported as unsupported and are not changed. Hook commands find the current custom or port-zero local API through a private `~/.config/harness-cp/hook-endpoint.json` record. The local endpoint requires both the Rivetplane owner marker and its random secret.
+
+See the repository [capability matrix](../../docs/harness-capabilities.md) for the exact interface limits.
+
 Source and release instructions are in the [Rivetplane CLI repository](https://github.com/rivetplane/cli).

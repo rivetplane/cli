@@ -1,0 +1,7 @@
+{
+  "official_source": "https://opencode.ai/docs/plugins/",
+  "global_path": "~/.config/opencode/plugins/rivetplane.ts",
+  "project_path": ".opencode/plugins/rivetplane.ts",
+  "named_export": "Rivetplane",
+  "events": ["session.created", "session.updated", "session.status", "session.idle", "session.deleted", "session.error", "permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"]
+}

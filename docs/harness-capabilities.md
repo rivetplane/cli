@@ -1,59 +1,49 @@
 # Harness integration capability matrix
 
-This matrix reports only interfaces that have a public, exact identity contract. “Actionable” means that Rivetplane can send a native response for the exact pending request. “Telemetry” means that Rivetplane can observe an event but does not control it. “Lifecycle” means that Rivetplane reports session state only.
+The hook installer supports an integration only when the repository contains a checked configuration fixture and a checked native event fixture from an official public interface. An unsupported row is not installed, even when its binary is present.
 
-| Harness | Lifecycle and transcript | Approval or question | Message and interrupt | Restore | Integration status |
-|---|---|---|---|---|---|
-| Claude Code | Native hooks and existing JSONL discovery | Actionable `PermissionRequest` and `AskUserQuestion` only in a Rivetplane hook process; existing plain sessions stay read-only | Unsupported for an arbitrary plain session | `claude --resume <id>` | Actionable hooks plus read-only discovery |
-| Codex | Hook telemetry, rollout discovery, and app-server events | Actionable only through app-server exact request IDs; stock TUI hooks are telemetry | Actionable only through managed or configured app-server | `codex resume <id>` | App-server actionable; hooks telemetry |
-| Grok | `PreToolUse`, `Notification`, and `Stop` | No verified exact-ID reply interface | Unsupported | `grok -r <id>` | Telemetry |
-| OpenCode | Native HTTP/SSE and plugin event bus | Actionable through exact permission and question request IDs; options and free text are supported | Actionable through live HTTP/SSE | `opencode --session <id>` | Actionable live adapter and plugin |
-| Pi | Extension lifecycle and tool execution events | No verified exact-ID pending interface | Unsupported | `pi --session <id>` | Telemetry |
-| OMP | Native extension lifecycle | No verified exact-ID pending interface | Unsupported | `omp --session <id>` | Lifecycle |
-| Campfire | Host lifecycle and collaboration notifications; joiner invite URLs are not stored | Driver notification only; no verified exact-ID hook reply | Unsupported | Not claimed | Lifecycle |
-| Amp | Plugin lifecycle and status | No verified exact-ID pending interface | Unsupported | `amp threads continue <id>` | Lifecycle |
-| Cursor CLI | `beforeShellExecution` | Telemetry only | Unsupported | `cursor-agent --resume <id>` | Telemetry |
-| Gemini CLI | `BeforeTool` | Telemetry only | Unsupported | `gemini --resume <id>` | Telemetry |
-| Kiro CLI | `SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop` | Telemetry only | Unsupported | `kiro-cli chat --resume-id <id>` | Telemetry |
-| Rovo Dev | Session restore evidence | No verified actionable event | Unsupported | `acli rovodev run --restore <id>` | Lifecycle |
-| Copilot CLI | `PreToolUse` | Telemetry only | Unsupported | `copilot --resume <id>` | Telemetry |
-| CodeBuddy | `PreToolUse` | Telemetry only | Unsupported | `codebuddy --resume <id>` | Telemetry |
-| Factory/Droid | `PreToolUse` | Telemetry only | Unsupported | `droid --resume <id>` | Telemetry |
-| Qoder | `PreToolUse` | Telemetry only | Unsupported | `qodercli --resume <id>` | Telemetry |
-| Kimi Code | `PreToolUse` and `PostToolUse` | Telemetry only | Unsupported | Not claimed | Telemetry |
+| Harness | Hook or plugin installation | Verified hook behavior | Other Rivetplane adapter | Status |
+|---|---|---|---|---|
+| Claude Code | `~/.claude/settings.json` or `CLAUDE_CONFIG_DIR/settings.json` | PermissionRequest, PreToolUse, PostToolUse, Stop, and SessionEnd; AskUserQuestion uses the PreToolUse payload and exact tool-use ID | Existing-session JSONL discovery is read-only | Verified and supported |
+| OpenCode | `~/.config/opencode/plugins/rivetplane.ts` or `XDG_CONFIG_HOME/opencode/plugins/rivetplane.ts` | Official plugin event envelope, exact permission/question ID, multi-question option arrays, free text, and reply events | HTTP/SSE is authoritative for attached sessions; CLI export is read-only | Verified and supported |
+| Codex | None | No hook configuration is installed | Managed or configured app-server is actionable; rollout discovery is read-only | Hook integration unsupported |
+| Grok | None | No checked official configuration and payload fixture | None | Unsupported |
+| Pi | None | No checked official configuration and payload fixture | None | Unsupported |
+| OMP | None | No checked official configuration and payload fixture | None | Unsupported |
+| Campfire | None | No checked official configuration and payload fixture | None | Unsupported |
+| Amp | None | No checked official configuration and payload fixture | None | Unsupported |
+| Cursor CLI | None | No checked official configuration and payload fixture | None | Unsupported |
+| Gemini CLI | None | No checked official configuration and payload fixture | None | Unsupported |
+| Kiro CLI | None | No checked official configuration and payload fixture | None | Unsupported |
+| Rovo Dev | None | No checked official configuration and payload fixture | None | Unsupported |
+| Copilot CLI | None | No checked official configuration and payload fixture | None | Unsupported |
+| CodeBuddy | None | No checked official configuration and payload fixture | None | Unsupported |
+| Factory/Droid | None | No checked official configuration and payload fixture | None | Unsupported |
+| Qoder | None | No checked official configuration and payload fixture | None | Unsupported |
+| Kimi Code | None | No checked official configuration and payload fixture | None | Unsupported |
 
-## Safety rules
+The checked fixtures are in `packages/client/src/fixtures/hooks`. The code test compares the generated Claude settings with the configuration fixture. It also checks the generated OpenCode plugin contract and runs the official native payload fixtures through normalization and reply handling.
 
-- A hook preserves the full native session ID, request ID, tool ID, cwd, model, agent, and transport name.
-- Codex stock hooks never wait for a remote decision. Its supported app-server is the action interface.
-- A blocking bridge has a 120-second soft wait. A timeout returns a neutral result.
-- A reply must match the current session ID and pending ID. A late or stale reply is rejected.
-- OpenCode live HTTP/SSE capabilities have priority over export discovery capabilities.
-- A native resolution event, or an exact-ID list refresh, clears pending state.
-- Hook files use an ownership marker. Installation preserves other settings. Installation refuses to replace an unmarked standalone file.
-- `RIVETPLANE_HOOKS_DISABLED=1` disables hooks for one process.
-- Launch command capture removes prompts, credentials, environment assignments, old session selectors, and unsafe noninteractive flags.
-- Campfire records only the host role. It does not store or replay joiner invite URLs.
+## Hook endpoint security
 
-## Interface research
+The local client creates a random 256-bit hook token. It writes the current loopback endpoint, token, process ID, owner marker, and start time to `~/.config/harness-cp/hook-endpoint.json`. The directory has mode `0700` and the file has mode `0600` on POSIX systems. The reader rejects a symbolic link, broad permissions, a different file owner, a non-loopback URL, a wrong owner marker, and a stale process. The client removes the file at shutdown only when the stored token still matches.
 
-The implementation was checked against these public interfaces:
+Every hook POST must send both `x-rivetplane-hook-owner: rivetplane-hook-v1` and the current secret in `x-rivetplane-hook-token`. This discovery record lets global hooks find a client that uses a custom port or port `0`.
 
-- [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks)
-- [Claude Code CLI resume](https://docs.anthropic.com/en/docs/claude-code/cli-usage)
-- [Codex app-server protocol](https://github.com/openai/codex/tree/main/codex-rs/app-server)
-- [Codex configuration](https://developers.openai.com/codex/config-reference/)
-- [OpenCode plugins](https://opencode.ai/docs/plugins/)
-- [OpenCode server](https://opencode.ai/docs/server/)
-- [Pi extensions](https://pi.dev/docs/latest/extensions)
-- [Pi RPC events](https://pi.dev/docs/latest/rpc)
-- [Cursor hooks](https://cursor.com/docs/hooks)
-- [Gemini CLI hooks](https://geminicli.com/docs/hooks/reference/)
-- [Kiro hooks](https://kiro.dev/docs/hooks/)
-- [GitHub Copilot hooks](https://docs.github.com/en/copilot/reference/hooks-reference)
-- [Factory/Droid hooks](https://docs.factory.ai/harness/hooks)
-- [Qoder hooks](https://docs.qoder.com/cli/hooks)
-- [Kimi Code hooks](https://moonshotai.github.io/kimi-code/en/customization/hooks)
-- [Rovo Dev CLI](https://developer.atlassian.com/cloud/acli/reference/commands/rovodev/)
+## Lifecycle and waiter rules
 
-No action support is claimed for a harness that does not publish an exact-ID response interface.
+- Stop and session.idle mean `waiting_input`.
+- Only SessionEnd and session.deleted mean `completed`.
+- A timeout, local reply, replacement, or shutdown settles its exact waiter and removes its target.
+- A reply must match both the session ID and pending ID.
+- OpenCode HTTP/SSE stays authoritative. A plugin event cannot create a second waiter for a session that the live adapter owns.
+- OpenCode question replies preserve the full array for every question. Claude AskUserQuestion replies use the documented question-text-to-answer object.
+
+## Official sources
+
+- [Claude Code hooks reference](https://code.claude.com/docs/en/hooks)
+- [OpenCode plugin reference](https://opencode.ai/docs/plugins/)
+- [OpenCode server reference](https://opencode.ai/docs/server/)
+- [Codex app-server source and protocol](https://github.com/openai/codex/tree/main/codex-rs/app-server)
+
+No hook or restore support is claimed for an interface that does not have a checked fixture in this repository.

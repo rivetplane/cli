@@ -1,0 +1,9 @@
+{
+  "id": "event-question-replied-full",
+  "type": "question.replied",
+  "properties": {
+    "sessionID": "opencode-session-full",
+    "requestID": "question-full",
+    "answers": [["Safe"], ["Tests", "Lint"]]
+  }
+}
