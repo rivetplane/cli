@@ -82,14 +82,18 @@ test("keeps a timed-out Claude question visible as local-only pending state", as
 
 test("normalizes official OpenCode permission and multi-question event fixtures", async () => {
   const permission = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "permission-asked.json");
+  const permissionReplied = { type: "permission.replied", properties: { sessionID: "opencode-session-full", requestID: "permission-full", reply: "reject" } };
   const question = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "question-asked.json");
+  const questionReplied = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "question-replied.json");
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 1_000);
   const permissionWait = hooks.ingest(toHookEnvelope("opencode", permission.type, permission.properties)); await tick();
   assert.deepEqual(registry.get("opencode-session-full")?.pending && { id: registry.get("opencode-session-full")?.pending?.id, type: registry.get("opencode-session-full")?.pending?.type }, { id: "permission-full", type: "approval" });
-  hooks.respond("opencode-session-full", "permission-full", "deny"); assert.deepEqual(await permissionWait, { decision: "deny" });
+  const permissionConfirm = hooks.respond("opencode-session-full", "permission-full", "deny"); assert.deepEqual(await permissionWait, { decision: "deny" });
+  await hooks.ingest(toHookEnvelope("opencode", permissionReplied.type, permissionReplied.properties)); await permissionConfirm;
   const questionWait = hooks.ingest(toHookEnvelope("opencode", question.type, question.properties)); await tick();
-  hooks.respond("opencode-session-full", "question-full", '[["Safe"],["Tests","Lint"]]');
+  const questionConfirm = hooks.respond("opencode-session-full", "question-full", '[["Safe"],["Tests","Lint"]]');
   assert.deepEqual((await questionWait).updated_input, { answers: [["Safe"], ["Tests", "Lint"]] });
+  await hooks.ingest(toHookEnvelope("opencode", questionReplied.type, questionReplied.properties)); await questionConfirm;
   assert.deepEqual(hooks.harnesses(), [{ harness_type: "opencode", discovered_sessions: 1, attached_sessions: 1, discovered_session_ids: ["opencode-session-full"], attached_session_ids: ["opencode-session-full"] }]);
   assert.equal(hooks.capabilities()[0]?.session_capabilities?.question_response.supported, true);
 });
@@ -103,13 +107,26 @@ test("exact local resolution settles and removes only its matching waiter", asyn
   assert.deepEqual(await wait, { decision: "neutral" }); assert.equal(registry.get("opencode-session-full")?.pending, null); assert.equal(hooks.target("opencode-session-full"), undefined);
 });
 
+test("does not report an OpenCode response as successful without a native resolution event", async () => {
+  const asked = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "question-asked.json");
+  const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 1_000, 10);
+  const bridge = hooks.ingest(toHookEnvelope("opencode", asked.type, asked.properties)); await tick();
+  const confirmation = hooks.respond("opencode-session-full", "question-full", "Safe");
+  assert.deepEqual((await bridge).updated_input, { answers: [["Safe"], []] });
+  await assert.rejects(confirmation, /did not confirm/);
+  assert.equal(registry.get("opencode-session-full")?.pending?.id, "question-full");
+  assert.equal(registry.get("opencode-session-full")?.pending?.read_only, true);
+});
+
 test("replacement, timeout, and stop settle waiters without target leaks", async () => {
   const asked = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "question-asked.json");
+  const replied = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "question-replied.json");
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 20);
   const first = hooks.ingest(toHookEnvelope("opencode", asked.type, asked.properties)); await tick();
   const second = hooks.ingest(toHookEnvelope("opencode", asked.type, asked.properties)); await tick();
-  assert.deepEqual(await first, { decision: "neutral" }); hooks.respond("opencode-session-full", "question-full", "free text");
+  assert.deepEqual(await first, { decision: "neutral" }); const confirmed = hooks.respond("opencode-session-full", "question-full", "free text");
   assert.deepEqual((await second).updated_input, { answers: [["free text"], []] }); assert.equal(hooks.target("opencode-session-full"), undefined);
+  await hooks.ingest(toHookEnvelope("opencode", replied.type, replied.properties)); await confirmed;
   const timed = hooks.ingest(toHookEnvelope("opencode", asked.type, asked.properties)); assert.deepEqual(await timed, { decision: "neutral" });
   assert.equal(registry.get("opencode-session-full")?.pending, null); assert.equal(hooks.target("opencode-session-full"), undefined);
   const stopped = hooks.ingest(toHookEnvelope("opencode", asked.type, asked.properties)); await tick(); hooks.stop();
@@ -118,12 +135,14 @@ test("replacement, timeout, and stop settle waiters without target leaks", async
 
 test("a timeout clears only its matching pending record and target", async () => {
   const fixtureEvent = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "question-asked.json");
+  const replied = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "question-replied.json");
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 50);
   const firstProps = { ...fixtureEvent.properties, id: "question-first" }; const first = hooks.ingest(toHookEnvelope("opencode", fixtureEvent.type, firstProps));
   await new Promise((resolve) => setTimeout(resolve, 30));
   const secondProps = { ...fixtureEvent.properties, id: "question-second" }; const second = hooks.ingest(toHookEnvelope("opencode", fixtureEvent.type, secondProps));
   assert.deepEqual(await first, { decision: "neutral" }); assert.equal(registry.get("opencode-session-full")?.pending?.id, "question-second"); assert.ok(hooks.target("opencode-session-full"));
-  hooks.respond("opencode-session-full", "question-second", "Safe"); assert.deepEqual((await second).updated_input, { answers: [["Safe"], []] });
+  const confirmed = hooks.respond("opencode-session-full", "question-second", "Safe"); assert.deepEqual((await second).updated_input, { answers: [["Safe"], []] });
+  await hooks.ingest(toHookEnvelope("opencode", replied.type, { ...replied.properties, requestID: "question-second" })); await confirmed;
 });
 
 test("the live OpenCode HTTP/SSE adapter prevents a plugin waiter", async () => {

@@ -117,7 +117,44 @@ function extensionSource(definition: HarnessHookDefinition, bridge: HookBridgeIn
 }
 
 function openCodePluginSource(bridge: HookBridgeInstallation): string {
-  return `// ${HOOK_OWNER}\n// Generated from https://opencode.ai/docs/plugins/ and the official SDK event types.\nexport const Rivetplane = async (ctx) => ({\n  event: async ({ event }) => {\n    if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return;\n    const props = event?.properties || {};\n    const session_id = props.sessionID || props.info?.id;\n    if (!session_id) return;\n    const request_id = props.id || props.requestID;\n    let result = { decision: "neutral" };\n    try {\n      const child = Bun.spawn([${JSON.stringify(bridge.node)}, ${JSON.stringify(bridge.bridge)}, "--owner", ${JSON.stringify(HOOK_OWNER)}, "--harness", "opencode", "--event", event.type], { stdin: "pipe", stdout: "pipe", stderr: "ignore", env: process.env });\n      child.stdin.write(JSON.stringify(props)); child.stdin.end();\n      const output = await new Response(child.stdout).text(); await child.exited;\n      if (output) result = JSON.parse(output);\n    } catch {}\n    if (!request_id || result.decision === "neutral") return;\n    if (event.type === "permission.asked") {\n      const reply = result.decision === "deny" ? "reject" : result.scope && result.scope !== "once" ? "always" : "once";\n      try { await ctx.client.permission.reply({ requestID: request_id, directory: ctx.directory, reply }); } catch {}\n    } else if (event.type === "question.asked" && result.decision === "answer") {\n      const count = Array.isArray(props.questions) ? props.questions.length : 1;\n      const supplied = result.updated_input?.answers;\n      const answers = Array.isArray(supplied) ? Array.from({ length: count }, (_, index) => Array.isArray(supplied[index]) ? supplied[index] : []) : Array.from({ length: count }, (_, index) => index === 0 ? [result.response || ""] : []);\n      try { await ctx.client.question.reply({ requestID: request_id, directory: ctx.directory, answers }); } catch {}\n    }\n  },\n});\n`;
+  return `// ${HOOK_OWNER}
+// Generated from https://opencode.ai/docs/plugins/ and the official SDK event types.
+export const Rivetplane = async (ctx) => ({
+  event: async ({ event }) => {
+    if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return;
+    const props = event?.properties || {};
+    const session_id = props.sessionID || props.info?.id;
+    if (!session_id) return;
+    const request_id = props.id || props.requestID;
+    let result = { decision: "neutral" };
+    try {
+      const child = Bun.spawn([${JSON.stringify(bridge.node)}, ${JSON.stringify(bridge.bridge)}, "--owner", ${JSON.stringify(HOOK_OWNER)}, "--harness", "opencode", "--event", event.type], { stdin: "pipe", stdout: "pipe", stderr: "ignore", env: process.env });
+      child.stdin.write(JSON.stringify(props)); child.stdin.end();
+      const output = await new Response(child.stdout).text(); await child.exited;
+      if (output) result = JSON.parse(output);
+    } catch {}
+    if (!request_id || result.decision === "neutral") return;
+    const nativeReply = async (path, requestID, body) => {
+      // Reuse the plugin client's in-process transport. OpenCode 1.14+ can keep
+      // pending questions in a different service tree from the TCP listener, so
+      // fetch(ctx.serverUrl) may return 404 while the TUI still owns the request.
+      const client = ctx.client?._client;
+      if (!client?.post) throw new Error("OpenCode plugin client does not expose its native transport");
+      const result = await client.post({ url: path, path: { requestID }, query: { directory: ctx.directory }, body, headers: { "content-type": "application/json" } });
+      if (result?.error !== undefined || (result?.data !== true && result !== true)) throw new Error("OpenCode native response was not accepted: " + JSON.stringify(result?.error ?? result));
+    };
+    if (event.type === "permission.asked") {
+      const reply = result.decision === "deny" ? "reject" : result.scope && result.scope !== "once" ? "always" : "once";
+      await nativeReply("/permission/{requestID}/reply", request_id, { reply });
+    } else if (event.type === "question.asked" && result.decision === "answer") {
+      const count = Array.isArray(props.questions) ? props.questions.length : 1;
+      const supplied = result.updated_input?.answers;
+      const answers = Array.isArray(supplied) ? Array.from({ length: count }, (_, index) => Array.isArray(supplied[index]) ? supplied[index] : []) : Array.from({ length: count }, (_, index) => index === 0 ? [result.response || ""] : []);
+      await nativeReply("/question/{requestID}/reply", request_id, { answers });
+    }
+  },
+});
+`;
 }
 
 async function atomicJson(path: string, value: unknown): Promise<void> { await assertSafeExistingFile(path, true); await mkdir(dirname(path), { recursive: true }); const temp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`; await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" }); if (process.platform !== "win32") await chmod(temp, 0o600); await rename(temp, path); if (process.platform !== "win32") await chmod(path, 0o600); }

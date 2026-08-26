@@ -8,6 +8,7 @@ import { SessionRegistry } from "./registry.js";
 export const HOOK_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_HOOK_WAIT_MS = 30 * 60_000;
 export const DEFAULT_CLAUDE_QUESTION_WAIT_MS = 15_000;
+export const DEFAULT_NATIVE_CONFIRMATION_WAIT_MS = 10_000;
 
 export type HookActionMode = "actionable" | "telemetry" | "lifecycle";
 
@@ -35,6 +36,15 @@ export interface HookBridgeResult {
 }
 
 interface Waiter { session_id: string; pending_id: string; resolve(value: HookBridgeResult): void; timer: NodeJS.Timeout }
+interface Confirmation {
+  session_id: string;
+  pending_id: string;
+  response: string;
+  scope?: "once" | "always_this_tool" | "always_session";
+  resolve(): void;
+  reject(error: Error): void;
+  timer: NodeJS.Timeout;
+}
 
 const ACTIONABLE_EVENTS: Record<string, Set<string>> = {
   "claude-code": new Set(["PermissionRequest", "AskUserQuestion"]),
@@ -118,11 +128,12 @@ export function validateHookEnvelope(value: unknown): NativeHookEnvelope {
 
 export class HookIngestor {
   #waiters = new Map<string, Waiter>();
+  #confirmations = new Map<string, Confirmation>();
   #targets = new Set<string>();
   #cursors = new Map<string, number>();
   #harnesses = new Map<string, { cwd: string; transport: string; mode: HookActionMode }>();
   #authoritativeTarget: (harness: string, sessionId: string) => boolean = () => false;
-  constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly wait_ms = DEFAULT_HOOK_WAIT_MS) {}
+  constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly wait_ms = DEFAULT_HOOK_WAIT_MS, private readonly confirmation_wait_ms = DEFAULT_NATIVE_CONFIRMATION_WAIT_MS) {}
 
   target(id: string): CommandTarget | undefined { return this.#targets.has(id) ? new HookTarget(this, id) : undefined; }
   setAuthoritativeTarget(check: (harness: string, sessionId: string) => boolean): void { this.#authoritativeTarget = check; }
@@ -193,7 +204,7 @@ export class HookIngestor {
 
     const pending = this.#pending(input, ts, claudeQuestionObservation);
     if (!pending) {
-      if (isResolution(input.event) && input.request_id) this.#settle(id, input.request_id, { decision: "neutral" }, true);
+      if (isResolution(input.event) && input.request_id) this.#confirm(id, input.request_id);
       return { decision: "neutral" };
     }
     this.registry.setPending(id, pending);
@@ -220,24 +231,52 @@ export class HookIngestor {
     });
   }
 
-  respond(sessionId: string, pendingId: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void {
-    const waiter = this.#waiters.get(waiterKey(sessionId, pendingId)); const pending = this.registry.get(sessionId)?.pending;
+  respond(sessionId: string, pendingId: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): Promise<void> {
+    const waiter = this.#waiters.get(waiterKey(sessionId, pendingId)); const session = this.registry.get(sessionId); const pending = session?.pending;
     if (!waiter || waiter.session_id !== sessionId || !pending || pending.id !== pendingId) throw new Error(`Pending interaction ${pendingId} is no longer active`);
-    clearTimeout(waiter.timer); this.#waiters.delete(waiterKey(sessionId, pendingId)); this.#removeTargetIfIdle(sessionId); this.registry.setPending(sessionId, null); this.registry.setStatus(sessionId, "running");
+    const key = waiterKey(sessionId, pendingId);
+    clearTimeout(waiter.timer); this.#waiters.delete(key); this.#removeTargetIfIdle(sessionId);
+    const confirmed = session?.harness_type === "opencode" ? new Promise<void>((resolve, reject) => {
+      const confirmation: Confirmation = { session_id: sessionId, pending_id: pendingId, response, ...(scope ? { scope } : {}), resolve, reject, timer: undefined as unknown as NodeJS.Timeout };
+      confirmation.timer = setTimeout(() => {
+        if (this.#confirmations.get(key) !== confirmation) return;
+        this.#confirmations.delete(key);
+        const current = this.registry.get(sessionId)?.pending;
+        if (current?.id === pendingId) this.registry.setPending(sessionId, { ...current, read_only: true });
+        reject(new Error("OpenCode did not confirm that the pending interaction was resolved"));
+      }, this.confirmation_wait_ms);
+      confirmation.timer.unref(); this.#confirmations.set(key, confirmation);
+    }) : Promise.resolve();
+    if (session?.harness_type !== "opencode") { this.registry.setPending(sessionId, null); this.registry.setStatus(sessionId, "running"); }
     if (pending.type === "approval") {
       const decision = response === "deny" ? "deny" : "approve";
-      this.registry.append(sessionId, "permission_response", { approval_id: pendingId, resolution: decision, ...(scope ? { scope } : {}) });
+      if (session?.harness_type !== "opencode") this.registry.append(sessionId, "permission_response", { approval_id: pendingId, resolution: decision, ...(scope ? { scope } : {}) });
       waiter.resolve({ decision, ...(scope ? { scope } : {}) });
     } else {
       const answers = decodeAnswers(response, pending.questions?.length ?? 1);
       const nativeAnswers = this.registry.get(sessionId)?.harness_type === "claude-code" ? Object.fromEntries((pending.questions ?? []).map((question, index) => [question.prompt, answers[index]?.join(", ") ?? ""])) : answers;
       waiter.resolve({ decision: "answer", response, updated_input: { answers: nativeAnswers } });
     }
+    return confirmed;
   }
 
   stop(): void {
     for (const waiter of [...this.#waiters.values()]) this.#settle(waiter.session_id, waiter.pending_id, { decision: "neutral" }, true);
+    for (const confirmation of this.#confirmations.values()) { clearTimeout(confirmation.timer); confirmation.reject(new Error("Hook transport stopped before native confirmation")); }
+    this.#confirmations.clear();
     this.#targets.clear(); this.#cursors.clear();
+  }
+
+  #confirm(sessionId: string, pendingId: string): void {
+    const key = waiterKey(sessionId, pendingId); const confirmation = this.#confirmations.get(key);
+    if (!confirmation) { this.#settle(sessionId, pendingId, { decision: "neutral" }, true); return; }
+    clearTimeout(confirmation.timer); this.#confirmations.delete(key);
+    const pending = this.registry.get(sessionId)?.pending;
+    if (pending?.id === pendingId) {
+      this.registry.setPending(sessionId, null); this.registry.setStatus(sessionId, "running");
+      if (pending.type === "approval") this.registry.append(sessionId, "permission_response", { approval_id: pendingId, resolution: confirmation.response === "deny" ? "deny" : "approve", ...(confirmation.scope ? { scope: confirmation.scope } : {}) });
+    }
+    confirmation.resolve();
   }
 
   #settle(sessionId: string, pendingId: string, result: HookBridgeResult, clearPending: boolean): void {
@@ -284,7 +323,7 @@ class HookTarget implements CommandTarget {
   constructor(private readonly ingestor: HookIngestor, private readonly id: string) {}
   sendMessage(): Promise<void> { return Promise.reject(new Error("This hook transport does not support messaging")); }
   interrupt(): Promise<void> { return Promise.reject(new Error("This hook transport does not support interrupt")); }
-  respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void { this.ingestor.respond(this.id, id, response, scope); }
+  respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): Promise<void> { return this.ingestor.respond(this.id, id, response, scope); }
 }
 
 function isToolStart(event: string): boolean { return /^(PreToolUse|beforeShellExecution|BeforeTool|preToolUse|tool_execution_start)$/i.test(event); }
