@@ -7,14 +7,15 @@ import { SessionRegistry } from "./registry.js";
 
 test("controls OpenCode sessions through the native SDK", async () => {
   let pending: "approval" | "approval_v2" | "question" | "question_v2" | "none" = "approval";
-  const requests: Array<{ method: string; path: string; body: string }> = [];
+  const requests: Array<{ method: string; path: string; url: string; body: string }> = []; const eventStreams: import("node:http").ServerResponse[] = [];
   const server = createServer(async (request, response) => {
     let body = ""; for await (const chunk of request) body += chunk;
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
-    requests.push({ method: request.method ?? "GET", path, body });
+    requests.push({ method: request.method ?? "GET", path, url: request.url ?? "/", body });
     response.setHeader("content-type", "application/json");
     const session = { id: "open-1", slug: "one", projectID: "p1", directory: "/repo", title: "Test", version: "1", time: { created: 1_700_000_000_000, updated: 1_700_000_001_000 } };
     const created = { ...session, id: "open-2", title: "Created" };
+    if (path === "/event") { response.writeHead(200, { "content-type": "text/event-stream", connection: "keep-alive", "cache-control": "no-cache" }); eventStreams.push(response); return; }
     if (path === "/global/health") response.end(JSON.stringify({ healthy: true, version: "test" }));
     else if (path === "/provider") response.end(JSON.stringify({ connected: ["provider-1"], default: { "provider-1": "model-1" }, all: [{ id: "provider-1", name: "Provider", source: "config", env: [], options: {}, models: { "model-1": { id: "model-1", providerID: "provider-1", name: "Model One", status: "active", limit: { context: 1000, output: 100 }, capabilities: {}, cost: {}, options: {}, headers: {}, api: {}, release_date: "2026-01-01" } } }] }));
     else if (path === "/session" && request.method === "POST") response.end(JSON.stringify(created));
@@ -30,12 +31,12 @@ test("controls OpenCode sessions through the native SDK", async () => {
       location: { directory: "/repo", project: { id: "p1", directory: "/repo", canonical: "/repo" } },
       data: pending === "approval_v2" ? [{ id: "perm-v2-1", sessionID: "open-1", action: "bash", resources: ["bun test"] }] : [],
     }));
-    else if (path === "/question") response.end(JSON.stringify(pending === "question" ? [{ id: "question-1", sessionID: "open-1", questions: [{ header: "Mode", question: "Which mode?", options: [{ label: "Safe", description: "Use safe mode" }] }] }] : []));
+    else if (path === "/question") response.end(JSON.stringify(pending === "question" ? [{ id: "question-1", sessionID: "open-1", questions: [{ header: "Mode", question: "Which mode?", options: [{ label: "Safe", description: "Use safe mode" }] }, { header: "Checks", question: "Which checks?", options: [{ label: "Tests" }, { label: "Lint" }], multiple: true }] }] : []));
     else if (path === "/api/question/request") response.end(JSON.stringify({
       location: { directory: "/repo", project: { id: "p1", directory: "/repo", canonical: "/repo" } },
       data: pending === "question_v2" ? [{ id: "question-v2-1", sessionID: "open-1", questions: [{ header: "Mode", question: "Which V2 mode?", options: [{ label: "Safe", description: "Use safe mode" }] }] }] : [],
     }));
-    else if (path === "/permission/perm-1/reply" || path === "/api/session/open-1/permission/perm-v2-1/reply" || path === "/question/question-1/reply" || path === "/api/session/open-1/question/question-v2-1/reply" || path === "/session/open-1/prompt_async" || path === "/session/open-1/abort") response.end("true");
+    else if (path === "/permission/perm-1/reply" || path === "/api/session/open-1/permission/perm-v2-1/reply" || path === "/question/question-1/reply" || path === "/question/question-sse/reply" || path === "/api/session/open-1/question/question-v2-1/reply" || path === "/session/open-1/prompt_async" || path === "/session/open-1/abort") response.end("true");
     else { response.statusCode = 404; response.end(JSON.stringify({ error: "not found" })); }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -43,8 +44,14 @@ test("controls OpenCode sessions through the native SDK", async () => {
   const registry = new SessionRegistry(); const manager = new OpenCodeManager("machine-1", registry, { url, directory: "/repo" });
   try {
     await manager.poll();
+    assert.equal(new URL(requests.find((item) => item.path === "/session")?.url ?? "/", url).searchParams.get("directory"), "/repo");
     assert.equal(manager.harnesses()[0]?.attached_sessions, 1);
     assert.equal(manager.capabilities()?.models[0]?.model_id, "model-1");
+    assert.equal(manager.capabilities()?.transport, "opencode-http-sse");
+    assert.equal(manager.capabilities()?.session_capabilities?.messaging.supported, true);
+    assert.equal(manager.capabilities()?.session_capabilities?.interrupt?.supported, true);
+    assert.equal(manager.capabilities()?.session_capabilities?.approval_response.supported, true);
+    assert.equal(manager.capabilities()?.session_capabilities?.question_response.supported, true);
     assert.equal(registry.get("open-1")?.pending?.id, "perm-1");
     assert.deepEqual(registry.transcript("open-1").filter((event) => event.type.endsWith("message")).map((event) => event.payload), [{ text: "hello" }, { text: "hi" }]);
     await manager.target("open-1")?.respondToPending("perm-1", "approve", "once");
@@ -58,12 +65,23 @@ test("controls OpenCode sessions through the native SDK", async () => {
     pending = "question"; await manager.poll();
     assert.equal(registry.get("open-1")?.pending?.id, "question-1");
     await manager.target("open-1")?.respondToPending("question-1", "Safe");
-    assert.deepEqual(JSON.parse(requests.find((item) => item.path === "/question/question-1/reply")?.body ?? "{}" as string).answers, [["Safe"]]);
+    assert.deepEqual(JSON.parse(requests.find((item) => item.path === "/question/question-1/reply")?.body ?? "{}" as string).answers, [["Safe"], []]);
+    pending = "question"; await manager.poll(); await manager.target("open-1")?.respondToPending("question-1", '[["Safe"],["Tests","Lint"]]');
+    assert.deepEqual(JSON.parse(requests.filter((item) => item.path === "/question/question-1/reply").at(-1)?.body ?? "{}").answers, [["Safe"], ["Tests", "Lint"]]);
 
     pending = "question_v2"; await manager.poll();
     assert.equal(registry.get("open-1")?.pending?.id, "question-v2-1");
     await manager.target("open-1")?.respondToPending("question-v2-1", "Safe");
     assert.deepEqual(JSON.parse(requests.find((item) => item.path === "/api/session/open-1/question/question-v2-1/reply")?.body ?? "{}" as string).answers, [["Safe"]]);
+
+    pending = "none"; await manager.poll();
+    await until(() => eventStreams.length > 0);
+    eventStreams[0]!.write(`data: ${JSON.stringify({ id: "event-q", type: "question.asked", properties: { id: "question-sse", sessionID: "open-1", questions: [{ header: "Mode", question: "Live mode?", options: [{ label: "Fast", description: "Use SSE" }] }] } })}\n\n`);
+    await until(() => registry.get("open-1")?.pending?.id === "question-sse");
+    await manager.target("open-1")?.respondToPending("question-sse", "free text");
+    assert.deepEqual(JSON.parse(requests.find((item) => item.path === "/question/question-sse/reply")?.body ?? "{}").answers, [["free text"]]);
+    eventStreams[0]!.write(`data: ${JSON.stringify({ id: "event-q-resolved", type: "question.replied", properties: { sessionID: "open-1", requestID: "question-sse", answers: [["local"]] } })}\n\n`);
+    await until(() => registry.get("open-1")?.pending === null);
 
     await manager.target("open-1")?.sendMessage("continue");
     assert.equal(JSON.parse(requests.find((item) => item.path === "/session/open-1/prompt_async")?.body ?? "{}" as string).parts[0].text, "continue");
@@ -75,6 +93,8 @@ test("controls OpenCode sessions through the native SDK", async () => {
     assert.deepEqual(createBody.model, { providerID: "provider-1", id: "model-1" });
   } finally { manager.stop(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+async function until(check: () => boolean, timeout = 2_000): Promise<void> { const end = Date.now() + timeout; while (!check()) { if (Date.now() > end) throw new Error("Timed out"); await new Promise((resolve) => setTimeout(resolve, 10)); } }
 
 test("starts and stops a loopback OpenCode server on an available port", async () => {
   const server = createServer((request, response) => {

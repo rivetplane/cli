@@ -1,7 +1,7 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { createOpencodeServer } from "@opencode-ai/sdk/v2/server";
 import { createServer } from "node:net";
-import type { Part, PermissionRequest, PermissionV2Request, QuestionRequest, QuestionV2Request, Session as OpenCodeSession, SessionStatus as OpenCodeSessionStatus } from "@opencode-ai/sdk/v2/client";
+import type { Event as OpenCodeEvent, Part, PermissionRequest, PermissionV2Request, QuestionRequest, QuestionV2Request, Session as OpenCodeSession, SessionStatus as OpenCodeSessionStatus } from "@opencode-ai/sdk/v2/client";
 import type { ApprovalScope, SessionStatus } from "@rivetplane/shared/model";
 import type { CreateSessionCommand, HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
@@ -71,6 +71,8 @@ export class OpenCodeManager {
   #lastError = "";
   #capabilities: HarnessCapabilities | undefined;
   #capabilitiesAt = 0;
+  #eventAbort: AbortController | undefined;
+  #eventTask: Promise<void> | undefined;
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: OpenCodeManagerOptions = {}) {
     this.#url = options.url;
@@ -91,6 +93,7 @@ export class OpenCodeManager {
     this.#timer = undefined;
     this.#server?.close();
     this.#server = undefined;
+    this.#eventAbort?.abort(); this.#eventAbort = undefined; this.#eventTask = undefined;
     if (!this.options.url && !this.options.client) { this.#client = undefined; this.#url = undefined; }
   }
   target(id: string): CommandTarget | undefined { return this.#sessions.has(id) ? new OpenCodeTarget(this, id) : undefined; }
@@ -120,9 +123,10 @@ export class OpenCodeManager {
       unwrap(await client.global.health(), "health check");
       if (!this.#online) this.registry.emit("log", `OpenCode server found: ${this.url}`);
       this.#online = true; this.#lastError = "";
+      this.#ensureEventStream(client);
       if (!this.#capabilities || Date.now() - this.#capabilitiesAt > 60_000) await this.#refreshCapabilities();
       const [sessions, statuses] = await Promise.all([
-        client.session.list().then((result) => unwrap(result, "session list")),
+        client.session.list({ directory: this.directory }).then((result) => unwrap(result, "session list")),
         client.session.status().then((result) => unwrap(result, "session status")),
       ]);
       const [permissions, questions] = await Promise.all([
@@ -148,6 +152,41 @@ export class OpenCodeManager {
     } finally { this.#polling = false; }
   }
 
+  #ensureEventStream(client: OpencodeClient): void {
+    if (this.#eventTask) return;
+    const controller = new AbortController(); this.#eventAbort = controller;
+    this.#eventTask = (async () => {
+      const subscription = await client.event.subscribe({ directory: this.directory }, { signal: controller.signal });
+      for await (const event of subscription.stream) await this.#nativeEvent(event as OpenCodeEvent);
+    })().catch((error: unknown) => {
+      if (!controller.signal.aborted) this.registry.emit("warning", new Error(`OpenCode event stream ended: ${error instanceof Error ? error.message : String(error)}`));
+    }).finally(() => { if (this.#eventAbort === controller) { this.#eventAbort = undefined; this.#eventTask = undefined; } });
+  }
+
+  async #nativeEvent(event: OpenCodeEvent): Promise<void> {
+    if (event.type === "permission.asked") {
+      const permission: PendingPermission = { ...event.properties, api: "legacy" };
+      this.#permissions.set(permission.id, permission); this.#syncPending([...this.#permissions.values()], [...this.#questions.values()]); return;
+    }
+    if (event.type === "question.asked") {
+      const question: PendingQuestion = { ...event.properties, api: "legacy" };
+      this.#questions.set(question.id, question); this.#syncPending([...this.#permissions.values()], [...this.#questions.values()]); return;
+    }
+    if (event.type === "permission.replied" || event.type === "question.replied" || event.type === "question.rejected") {
+      const requestId = event.properties.requestID; this.#permissions.delete(requestId); this.#questions.delete(requestId);
+      const session = this.registry.get(event.properties.sessionID);
+      if (session?.pending?.id === requestId) { this.registry.setPending(session.id, null); this.registry.setStatus(session.id, "running"); }
+      return;
+    }
+    if (event.type === "session.status") {
+      const session = this.registry.get(event.properties.sessionID); if (session && !session.pending) this.registry.setStatus(session.id, mapStatus(event.properties.status)); return;
+    }
+    if (event.type === "session.idle") {
+      const session = this.registry.get(event.properties.sessionID); if (session && !session.pending) this.registry.setStatus(session.id, "waiting_input"); return;
+    }
+    if (event.type === "message.updated" || event.type === "message.part.updated" || event.type === "session.created" || event.type === "session.updated") queueMicrotask(() => void this.poll());
+  }
+
   async #refreshCapabilities(): Promise<void> {
     const roster = unwrap(await this.#requireClient().provider.list({ directory: this.directory }), "provider list");
     const connected = new Set(roster.connected);
@@ -156,7 +195,17 @@ export class OpenCodeManager {
       context_limit: model.limit.context, output_limit: model.limit.output,
     }))).sort((a, b) => a.name.localeCompare(b.name));
     this.#capabilities = { machine_id: this.machine_id, harness_type: "opencode", can_create_session: true,
-      directories: [this.directory], models, reported_at: new Date().toISOString() };
+      directories: [this.directory], models, reported_at: new Date().toISOString(), transport: "opencode-http-sse",
+      session_capabilities: {
+        persisted_discovery: { supported: true, mode: "read_write" },
+        discovery: { supported: true, mode: "read_write" },
+        transcript: { supported: true, mode: "read_write" },
+        live_attachment: { supported: true, mode: "read_write" },
+        messaging: { supported: true, mode: "read_write" },
+        interrupt: { supported: true, mode: "read_write" },
+        question_response: { supported: true, mode: "read_write" },
+        approval_response: { supported: true, mode: "read_write" },
+      } };
     this.#capabilitiesAt = Date.now();
   }
 
@@ -190,7 +239,7 @@ export class OpenCodeManager {
     } else {
       const request = this.#questions.get(pendingId);
       if (!request) throw new Error(`Question ${pendingId} is no longer active`);
-      const answers = request.questions.map((_, index) => index === 0 ? [response] : []);
+      const answers = decodeQuestionAnswers(response, request.questions.length);
       if (request.api === "v2") {
         unwrap(await this.#requireClient().v2.session.question.reply({
           sessionID: id,
@@ -212,7 +261,7 @@ export class OpenCodeManager {
       id: session.id, machine_id: this.machine_id, harness_type: "opencode", cwd: session.directory,
       status: current?.pending?.type === "approval" ? "waiting_approval" : current?.pending?.type === "question" ? "waiting_input" : mapStatus(status),
       created_at: iso(session.time.created), last_activity_at: iso(session.time.updated), pending: current?.pending ?? null,
-    });
+    }, { authority: 100 });
     if (first) this.registry.emit("log", `Harness attached: opencode (${session.id})`);
     const messages = unwrap(await this.#requireClient().session.messages({ sessionID: session.id, directory: session.directory }), `messages for ${session.id}`);
     for (const message of messages) this.#syncParts(session.id, message.info.role, message.parts);
@@ -338,4 +387,13 @@ class OpenCodeTarget implements CommandTarget {
   sendMessage(text: string): Promise<void> { return this.manager.sendMessage(this.id, text); }
   respondToPending(id: string, response: string, scope?: ApprovalScope): Promise<void> { return this.manager.respondToPending(this.id, id, response, scope); }
   interrupt(): Promise<void> { return this.manager.interrupt(this.id); }
+}
+
+function decodeQuestionAnswers(response: string, count: number): string[][] {
+  try {
+    const value = JSON.parse(response) as unknown;
+    if (Array.isArray(value) && value.every((item) => Array.isArray(item) && item.every((answer) => typeof answer === "string"))) return Array.from({ length: count }, (_, index) => (value[index] as string[] | undefined) ?? []);
+    if (count === 1 && Array.isArray(value) && value.every((item) => typeof item === "string")) return [value as string[]];
+  } catch {}
+  return Array.from({ length: count }, (_, index) => index === 0 ? [response] : []);
 }
