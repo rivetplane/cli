@@ -29,18 +29,20 @@ export function toHookEnvelope(harness: string, configuredEvent: string, payload
 }
 
 export async function emitHook(harness: string, event: string, options: { owner?: string; endpoint?: string; token?: string; discovery_path?: string; payload?: Record<string, unknown>; timeout_ms?: number } = {}): Promise<unknown> {
-  if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return {};
   if (options.owner !== HOOK_OWNER) throw new Error("Hook ownership marker is invalid");
-  const payload = options.payload ?? await readHookInput(); const envelope = toHookEnvelope(harness, event, payload);
-  const configuredEndpoint = options.endpoint ?? process.env.RIVETPLANE_HOOK_ENDPOINT;
-  const configuredToken = options.token ?? process.env.RIVETPLANE_HOOK_TOKEN;
-  const discovery = configuredEndpoint && configuredToken ? undefined : await readHookDiscovery(options.discovery_path ?? process.env.RIVETPLANE_HOOK_DISCOVERY ?? defaultHookDiscoveryPath());
-  const endpoint = validateHookEndpoint(configuredEndpoint ?? discovery?.endpoint);
-  const token = configuredToken ?? discovery?.token;
-  if (!token) throw new Error("Hook token is required");
-  const actionable = (harness === "claude-code" && (event === "PermissionRequest" || event === "PreToolUse" && payload.tool_name === "AskUserQuestion")) || (harness === "opencode" && (event === "permission.asked" || event === "question.asked"));
   try {
-    const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", "x-rivetplane-hook-owner": HOOK_OWNER, "x-rivetplane-hook-token": token }, body: JSON.stringify(envelope), signal: AbortSignal.timeout(options.timeout_ms ?? (actionable ? 125_000 : 3_000)) });
+    if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return {};
+    const payload = options.payload ?? await readHookInput(); const envelope = toHookEnvelope(harness, event, payload);
+    const configuredEndpoint = options.endpoint ?? process.env.RIVETPLANE_HOOK_ENDPOINT;
+    const configuredToken = options.token ?? process.env.RIVETPLANE_HOOK_TOKEN;
+    const discovery = configuredEndpoint && configuredToken ? undefined : await readHookDiscovery(options.discovery_path ?? process.env.RIVETPLANE_HOOK_DISCOVERY ?? defaultHookDiscoveryPath());
+    const endpoint = validateHookEndpoint(configuredEndpoint ?? discovery?.endpoint);
+    const token = configuredToken ?? discovery?.token;
+    if (!token) return {};
+    const actionable = (harness === "claude-code" && (event === "PermissionRequest" || event === "PreToolUse" && payload.tool_name === "AskUserQuestion")) || (harness === "opencode" && (event === "permission.asked" || event === "question.asked"));
+    const environmentTimeout = Number(process.env.RIVETPLANE_HOOK_TIMEOUT_MS);
+    const timeout = options.timeout_ms ?? (Number.isSafeInteger(environmentTimeout) && environmentTimeout > 0 ? environmentTimeout : actionable ? 125_000 : 3_000);
+    const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", "x-rivetplane-hook-owner": HOOK_OWNER, "x-rivetplane-hook-token": token }, body: JSON.stringify(envelope), signal: AbortSignal.timeout(timeout) });
     if (!response.ok) return {};
     return formatNativeResult(harness, event, payload, await response.json() as HookBridgeResult);
   } catch { return {}; }
@@ -48,6 +50,7 @@ export async function emitHook(harness: string, event: string, options: { owner?
 
 export function formatNativeResult(harness: string, event: string, input: Record<string, unknown>, result: HookBridgeResult): unknown {
   if (result.decision === "neutral") return {};
+  if (harness === "opencode") return result;
   if (harness === "claude-code" && event === "PermissionRequest") {
     const decision = result.decision === "deny" ? { behavior: "deny", message: "Denied through Rivetplane" } : { behavior: "allow", updatedInput: object(input.tool_input) };
     return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision } };

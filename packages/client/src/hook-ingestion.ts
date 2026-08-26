@@ -155,7 +155,7 @@ export class HookIngestor {
       if (replaced) { clearTimeout(replaced.timer); replaced.resolve({ decision: "neutral" }); }
       const waiter = { session_id: id, pending_id: pending.id, resolve, timer: undefined as unknown as NodeJS.Timeout };
       waiter.timer = setTimeout(() => { if (this.#waiters.get(key) === waiter) this.#settle(id, pending.id, { decision: "neutral" }, true); }, this.wait_ms);
-      waiter.timer.unref(); this.#waiters.set(key, waiter);
+      this.#waiters.set(key, waiter);
     });
   }
 

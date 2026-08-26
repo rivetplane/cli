@@ -5,7 +5,7 @@ import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
 import type { HookIngestor } from "./hook-ingestion.js";
-import { createHookToken, defaultHookDiscoveryPath, HOOK_OWNER, removeHookDiscovery, secretEquals, writeHookDiscovery } from "./hook-discovery.js";
+import { createHookToken, defaultHookDiscoveryPath, HOOK_DISCOVERY_VERSION, HOOK_OWNER, removeHookDiscovery, secretEquals, writeHookDiscovery } from "./hook-discovery.js";
 
 interface LocalApiOptions { port?: number; host?: "127.0.0.1" | "::1"; target(id: string): CommandTarget | undefined; harnesses?: () => HarnessDiscoveryStatus[]; discovery_directory?: string; hooks?: HookIngestor; hook_discovery_path?: string; hook_token?: string }
 
@@ -64,6 +64,10 @@ export class LocalApi {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
       const method = request.method ?? "GET";
+      if (method === "GET" && url.pathname === "/v1/hooks/health") {
+        if (!this.options.hooks || request.headers["x-rivetplane-hook-owner"] !== HOOK_OWNER || !this.#hookToken || !secretEquals(request.headers["x-rivetplane-hook-token"], this.#hookToken)) { send(response, 401, { error: "Hook ownership or token is invalid" }); return; }
+        send(response, 200, { owner: HOOK_OWNER, version: HOOK_DISCOVERY_VERSION, pid: process.pid }); return;
+      }
       if (method === "POST" && url.pathname === "/v1/hooks/events") {
         if (!this.options.hooks) { send(response, 404, { error: "Hook ingestion is disabled" }); return; }
         if (request.headers["x-rivetplane-hook-owner"] !== HOOK_OWNER || !this.#hookToken || !secretEquals(request.headers["x-rivetplane-hook-token"], this.#hookToken)) { send(response, 401, { error: "Hook ownership or token is invalid" }); return; }

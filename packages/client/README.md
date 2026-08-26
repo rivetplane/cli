@@ -25,7 +25,7 @@ Run `npx rivetplane --help` for all options.
 
 ## Verified hook installation
 
-`npx rivetplane hooks install` installs only checked Claude Code and OpenCode interfaces. Other harness names are reported as unsupported and are not changed. Hook commands find the current custom or port-zero local API through a private `~/.config/harness-cp/hook-endpoint.json` record. The local endpoint requires both the Rivetplane owner marker and its random secret.
+`npx rivetplane hooks install` installs only checked Claude Code and OpenCode interfaces. Other harness names are reported as unsupported and are not changed. The installed hooks call a private, versioned Node bridge at `~/.config/harness-cp/hooks/v1/bridge.cjs` through absolute quoted paths. They do not depend on a global package binary, the npm cache, or network access. Hook commands find the current custom or port-zero local API through a private `~/.config/harness-cp/hook-endpoint.json` record. The local endpoint requires both the Rivetplane owner marker and its random secret. Offline, stale, malformed, refused, and timed-out discovery returns `{}` with exit code 0 so Claude Code and OpenCode keep their native prompts. Full uninstall removes the owned bridge.
 
 See the repository [capability matrix](../../docs/harness-capabilities.md) for the exact interface limits.
 

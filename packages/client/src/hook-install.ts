@@ -1,7 +1,9 @@
-import { access, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { HOOK_OWNER } from "./hook-discovery.js";
+import { hookBridgeInstallation, installHookBridge, uninstallHookBridge, type HookBridgeInstallation } from "./hook-bridge-install.js";
 
 export { HOOK_OWNER } from "./hook-discovery.js";
 
@@ -38,31 +40,31 @@ export async function uninstallHooks(options: InstallerOptions = {}): Promise<In
   return applyHooks("uninstall", options);
 }
 
-export function claudeHookSettings(): Record<string, unknown> {
+export function claudeHookSettings(bridge: HookBridgeInstallation = hookBridgeInstallation()): Record<string, unknown> {
   const definition = HARNESS_HOOKS.find((item) => item.harness === "claude-code")!; const hooks: Record<string, unknown[]> = {};
-  for (const event of definition.events) hooks[event] = [{ matcher: "*", hooks: [{ type: "command", command: `rivetplane hook emit --owner ${HOOK_OWNER} --harness claude-code --event ${event}`, timeout: 125 }] }];
+  for (const event of definition.events) hooks[event] = [{ matcher: "*", hooks: [{ type: "command", command: bridge.command("claude-code", event), timeout: 125 }] }];
   return { hooks };
 }
 
 async function applyHooks(action: "install" | "uninstall", options: InstallerOptions): Promise<InstallResult[]> {
-  const env = options.env ?? process.env; const home = options.home ?? homedir(); const results: InstallResult[] = [];
+  const env = options.env ?? process.env; const home = options.home ?? homedir(); const results: InstallResult[] = []; let bridge: HookBridgeInstallation | undefined;
   for (const definition of HARNESS_HOOKS) {
     if (options.only && !options.only.includes(definition.harness)) continue;
     if (!definition.verified || definition.format === "none") { results.push({ harness: definition.harness, status: "skipped", reason: "Unsupported: no checked official configuration and event fixture" }); continue; }
-    const present = await (options.executable ?? ((name) => executableExists(name, options.path ?? env.PATH)))(definition.binary);
+    const present = action === "uninstall" || await (options.executable ?? ((name) => executableExists(name, options.path ?? env.PATH)))(definition.binary);
     if (!present) { results.push({ harness: definition.harness, status: "absent", reason: `${definition.binary} was not found` }); continue; }
-    const root = definition.env_home && env[definition.env_home] ? env[definition.env_home]! : home;
-    const relative = definition.env_home && env[definition.env_home] ? definition.env_home === "PI_CODING_AGENT_DIR" ? definition.config.replace(/^\.pi\/agent\//, "") : definition.config.replace(/^\.[^/]+\//, "") : definition.config;
-    const path = join(root, relative);
+    bridge ??= action === "install" ? await installHookBridge({ env, home }) : hookBridgeInstallation({ env, home });
+    const path = configPath(definition, home, env);
     try {
-      const status = definition.format === "owned-extension" ? await ownedFile(action, path, extensionSource(definition)) : await jsonConfig(action, path, definition);
+      const status = definition.format === "owned-extension" ? await ownedFile(action, path, extensionSource(definition, bridge)) : await jsonConfig(action, path, definition, bridge);
       results.push({ harness: definition.harness, status, path });
     } catch (error) { results.push({ harness: definition.harness, status: "skipped", path, reason: error instanceof Error ? error.message : String(error) }); }
   }
+  if (action === "uninstall" && !await hasOwnedHookConfiguration(home, env)) await uninstallHookBridge({ env, home });
   return results;
 }
 
-async function jsonConfig(action: "install" | "uninstall", path: string, definition: HarnessHookDefinition): Promise<"installed" | "updated" | "removed"> {
+async function jsonConfig(action: "install" | "uninstall", path: string, definition: HarnessHookDefinition, bridge: HookBridgeInstallation): Promise<"installed" | "updated" | "removed"> {
   let root: Record<string, unknown> = {}; let existed = false;
   try { root = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>; existed = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Configuration is not valid JSON"); }
   const hooksRoot = definition.format === "nested-json" ? object(root.hooks) : root;
@@ -72,7 +74,7 @@ async function jsonConfig(action: "install" | "uninstall", path: string, definit
     const entries = Array.isArray(hooksRoot[event]) ? hooksRoot[event] as Array<Record<string, unknown>> : [];
     const filtered = entries.filter((entry) => !JSON.stringify(entry).includes(HOOK_OWNER));
     if (action === "install") {
-      const command = `rivetplane hook emit --owner ${HOOK_OWNER} --harness ${definition.harness} --event ${event}`;
+      const command = bridge.command(definition.harness, event);
       const entry = definition.harness === "cursor" ? { command } : { matcher: "*", hooks: [{ type: "command", command, timeout: 125 }] };
       filtered.push(entry); changed = true;
     } else if (filtered.length !== entries.length) changed = true;
@@ -90,20 +92,33 @@ async function ownedFile(action: "install" | "uninstall", path: string, source: 
   if (prior !== undefined && !prior.includes(HOOK_OWNER)) throw new Error("Refused to overwrite an unmarked file");
   if (action === "uninstall") {
     if (prior === undefined) return "removed";
-    await rename(path, `${path}.removed-${Date.now()}`); return "removed";
+    await rm(path); return "removed";
   }
-  await mkdir(dirname(path), { recursive: true }); await writeFile(path, source, { encoding: "utf8", mode: 0o600 }); return prior === undefined ? "installed" : "updated";
+  await mkdir(dirname(path), { recursive: true }); const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`; await writeFile(temporary, source, { encoding: "utf8", mode: 0o600, flag: "wx" }); if (process.platform !== "win32") await chmod(temporary, 0o600); await rename(temporary, path); if (process.platform !== "win32") await chmod(path, 0o600); return prior === undefined ? "installed" : "updated";
 }
 
-function extensionSource(definition: HarnessHookDefinition): string {
-  if (definition.harness === "opencode") return openCodePluginSource();
+function extensionSource(definition: HarnessHookDefinition, bridge: HookBridgeInstallation): string {
+  if (definition.harness === "opencode") return openCodePluginSource(bridge);
   throw new Error(`No verified extension generator for ${definition.harness}`);
 }
 
-function openCodePluginSource(): string {
-  return `// ${HOOK_OWNER}\n// Generated from https://opencode.ai/docs/plugins/ and the official SDK event types.\nexport const Rivetplane = async (ctx) => ({\n  event: async ({ event }) => {\n    if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return;\n    const props = event?.properties || {};\n    const session_id = props.sessionID || props.info?.id;\n    if (!session_id) return;\n    const request_id = props.id || props.requestID;\n    let result = { decision: "neutral" };\n    try {\n      const child = Bun.spawn(["rivetplane", "hook", "emit", "--owner", ${JSON.stringify(HOOK_OWNER)}, "--harness", "opencode", "--event", event.type], { stdin: "pipe", stdout: "pipe", stderr: "ignore", env: process.env });\n      child.stdin.write(JSON.stringify(props)); child.stdin.end();\n      const output = await new Response(child.stdout).text(); await child.exited;\n      if (output) result = JSON.parse(output);\n    } catch {}\n    if (!request_id || result.decision === "neutral") return;\n    if (event.type === "permission.asked") {\n      const reply = result.decision === "deny" ? "reject" : result.scope && result.scope !== "once" ? "always" : "once";\n      try { await ctx.client.permission.reply({ requestID: request_id, directory: ctx.directory, reply }); } catch {}\n    } else if (event.type === "question.asked" && result.decision === "answer") {\n      const count = Array.isArray(props.questions) ? props.questions.length : 1;\n      const supplied = result.updated_input?.answers;\n      const answers = Array.isArray(supplied) ? Array.from({ length: count }, (_, index) => Array.isArray(supplied[index]) ? supplied[index] : []) : Array.from({ length: count }, (_, index) => index === 0 ? [result.response || ""] : []);\n      try { await ctx.client.question.reply({ requestID: request_id, directory: ctx.directory, answers }); } catch {}\n    }\n  },\n});\n`;
+function openCodePluginSource(bridge: HookBridgeInstallation): string {
+  return `// ${HOOK_OWNER}\n// Generated from https://opencode.ai/docs/plugins/ and the official SDK event types.\nexport const Rivetplane = async (ctx) => ({\n  event: async ({ event }) => {\n    if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return;\n    const props = event?.properties || {};\n    const session_id = props.sessionID || props.info?.id;\n    if (!session_id) return;\n    const request_id = props.id || props.requestID;\n    let result = { decision: "neutral" };\n    try {\n      const child = Bun.spawn([${JSON.stringify(bridge.node)}, ${JSON.stringify(bridge.bridge)}, "--owner", ${JSON.stringify(HOOK_OWNER)}, "--harness", "opencode", "--event", event.type], { stdin: "pipe", stdout: "pipe", stderr: "ignore", env: process.env });\n      child.stdin.write(JSON.stringify(props)); child.stdin.end();\n      const output = await new Response(child.stdout).text(); await child.exited;\n      if (output) result = JSON.parse(output);\n    } catch {}\n    if (!request_id || result.decision === "neutral") return;\n    if (event.type === "permission.asked") {\n      const reply = result.decision === "deny" ? "reject" : result.scope && result.scope !== "once" ? "always" : "once";\n      try { await ctx.client.permission.reply({ requestID: request_id, directory: ctx.directory, reply }); } catch {}\n    } else if (event.type === "question.asked" && result.decision === "answer") {\n      const count = Array.isArray(props.questions) ? props.questions.length : 1;\n      const supplied = result.updated_input?.answers;\n      const answers = Array.isArray(supplied) ? Array.from({ length: count }, (_, index) => Array.isArray(supplied[index]) ? supplied[index] : []) : Array.from({ length: count }, (_, index) => index === 0 ? [result.response || ""] : []);\n      try { await ctx.client.question.reply({ requestID: request_id, directory: ctx.directory, answers }); } catch {}\n    }\n  },\n});\n`;
 }
 
-async function atomicJson(path: string, value: unknown): Promise<void> { try { if ((await lstat(path)).isSymbolicLink()) throw new Error("Refused to replace a symbolic link"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } await mkdir(dirname(path), { recursive: true }); const temp = `${path}.${process.pid}.tmp`; await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 }); await rename(temp, path); }
+async function atomicJson(path: string, value: unknown): Promise<void> { try { if ((await lstat(path)).isSymbolicLink()) throw new Error("Refused to replace a symbolic link"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } await mkdir(dirname(path), { recursive: true }); const temp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`; await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" }); if (process.platform !== "win32") await chmod(temp, 0o600); await rename(temp, path); if (process.platform !== "win32") await chmod(path, 0o600); }
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 async function executableExists(name: string, pathValue = ""): Promise<boolean> { const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""]; for (const directory of pathValue.split(delimiter)) for (const extension of extensions) try { await access(join(directory, `${name}${extension}`)); return true; } catch {} return false; }
+
+function configPath(definition: HarnessHookDefinition, home: string, env: NodeJS.ProcessEnv): string {
+  const root = definition.env_home && env[definition.env_home] ? env[definition.env_home]! : home;
+  const relative = definition.env_home && env[definition.env_home] ? definition.config.replace(/^\.[^/]+\//, "") : definition.config;
+  return join(root, relative);
+}
+
+async function hasOwnedHookConfiguration(home: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  for (const definition of HARNESS_HOOKS.filter((item) => item.verified)) {
+    try { if ((await readFile(configPath(definition, home, env), "utf8")).includes(HOOK_OWNER)) return true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  return false;
+}

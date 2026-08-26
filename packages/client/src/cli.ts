@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { HarnessControlClient } from "./client.js";
 import { login, readCredentials, resolveServerUrl, writeCredentials } from "./credentials.js";
 import { emitHook } from "./hook-bridge.js";
+import { installHookBridge } from "./hook-bridge-install.js";
 import { claudeHookSettings, installHooks, uninstallHooks } from "./hook-install.js";
 
 const require = createRequire(import.meta.url);
@@ -150,7 +151,8 @@ async function main(): Promise<void> {
     const separator = process.argv.indexOf("--"); const claudeOptions = separator >= 0 ? process.argv.slice(separator + 1) : [];
     if (claudeOptions.includes("--settings")) throw new Error("Do not pass --settings to the Rivetplane Claude wrapper");
     const settingsDirectory = await mkdtemp(join(tmpdir(), "rivetplane-claude-")); const settingsPath = join(settingsDirectory, "settings.json");
-    await writeFile(settingsPath, `${JSON.stringify(claudeHookSettings(), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    const hookBridge = await installHookBridge();
+    await writeFile(settingsPath, `${JSON.stringify(claudeHookSettings(hookBridge), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     attachedProcess = spawn(flag("--claude-executable") ?? process.env.HARNESS_CP_CLAUDE_EXECUTABLE ?? "claude", ["--settings", settingsPath, ...claudeOptions], { cwd: process.cwd(), stdio: "inherit", env: { ...process.env } });
     const exitCode = await new Promise<number>((resolve, reject) => { attachedProcess?.once("error", reject); attachedProcess?.once("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0))); });
     await client.stop(); await rm(settingsDirectory, { recursive: true, force: true }); process.exitCode = exitCode;

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdtemp, symlink } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, symlink } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,4 +21,20 @@ test("rejects broad permissions, symbolic links, non-loopback endpoints, and the
   const link = join(root, "linked.json"); await symlink(path, link); await assert.rejects(readHookDiscovery(link), /regular file/);
   assert.throws(() => validateHookEndpoint("http://example.com/v1/hooks/events"), /loopback/);
   await assert.rejects(emitHook("claude-code", "Stop", { owner: "wrong", discovery_path: path, payload: {} }), /ownership/);
+});
+
+test("refuses an authenticated active owner but replaces a reused unreachable PID", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-hook-discovery-")); const path = join(root, "config", "hook-endpoint.json"); const token = createHookToken();
+  const server = createServer((request, response) => {
+    if (request.url === "/v1/hooks/health" && request.headers["x-rivetplane-hook-owner"] === HOOK_OWNER && request.headers["x-rivetplane-hook-token"] === token) {
+      response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ owner: HOOK_OWNER, version: 1, pid: process.pid })); return;
+    }
+    response.writeHead(401); response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+  await writeHookDiscovery(path, { version: 1, owner: HOOK_OWNER, endpoint: `http://127.0.0.1:${port}/v1/hooks/events`, token, pid: process.pid, started_at: new Date().toISOString() });
+  await assert.rejects(writeHookDiscovery(path, { version: 1, owner: HOOK_OWNER, endpoint: "http://127.0.0.1:1/v1/hooks/events", token: createHookToken(), pid: process.pid, started_at: new Date().toISOString() }), /active/);
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  const replacement = createHookToken(); await writeHookDiscovery(path, { version: 1, owner: HOOK_OWNER, endpoint: "http://127.0.0.1:1/v1/hooks/events", token: replacement, pid: process.pid, started_at: new Date().toISOString() });
+  assert.equal((JSON.parse(await readFile(path, "utf8")) as { token: string }).token, replacement);
 });

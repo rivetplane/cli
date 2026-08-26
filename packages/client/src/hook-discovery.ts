@@ -30,7 +30,7 @@ export async function writeHookDiscovery(path: string, record: HookDiscoveryReco
     assertOwnedAndPrivate(info, "Hook discovery file");
     const prior = JSON.parse(await readFile(path, "utf8")) as Partial<HookDiscoveryRecord>;
     if (prior.owner !== HOOK_OWNER || typeof prior.token !== "string") throw new Error("Refused to replace a discovery file not owned by Rivetplane");
-    if (Number.isSafeInteger(prior.pid) && prior.pid !== process.pid && processExists(prior.pid!)) throw new Error(`Another Rivetplane hook endpoint is active (process ${prior.pid})`);
+    if (await authenticatedHookEndpointAlive(prior)) throw new Error(`Another Rivetplane hook endpoint is active (process ${prior.pid ?? "unknown"})`);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -71,6 +71,17 @@ export function secretEquals(actual: unknown, expected: string): boolean {
   if (typeof actual !== "string") return false;
   const left = Buffer.from(actual); const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+export async function authenticatedHookEndpointAlive(record: Partial<HookDiscoveryRecord>, timeout_ms = 750): Promise<boolean> {
+  try {
+    const events = new URL(validateHookEndpoint(record.endpoint));
+    events.pathname = "/v1/hooks/health";
+    const response = await fetch(events, { headers: { "x-rivetplane-hook-owner": HOOK_OWNER, "x-rivetplane-hook-token": record.token ?? "" }, signal: AbortSignal.timeout(timeout_ms) });
+    if (!response.ok) return false;
+    const value = await response.json() as { owner?: unknown; version?: unknown; pid?: unknown };
+    return value.owner === HOOK_OWNER && value.version === HOOK_DISCOVERY_VERSION && value.pid === record.pid;
+  } catch { return false; }
 }
 
 async function assertSafeParent(path: string): Promise<void> {
