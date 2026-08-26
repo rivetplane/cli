@@ -9,6 +9,7 @@ import { OpenCodeExportDiscovery } from "./opencode-export-discovery.js";
 import { CodexRolloutDiscovery } from "./codex-rollout-discovery.js";
 import { CodexAppServerManager } from "./codex-app-server.js";
 import { ClaudeCodeDiscovery } from "./claude-code-discovery.js";
+import { HookIngestor } from "./hook-ingestion.js";
 
 export interface ClientOptions {
   credentials?: Credentials;
@@ -49,10 +50,12 @@ export class HarnessControlClient {
   readonly codex_rollouts?: CodexRolloutDiscovery;
   readonly codex_app_server?: CodexAppServerManager;
   readonly claude_code?: ClaudeCodeDiscovery;
+  readonly hooks: HookIngestor;
 
   constructor(private readonly options: ClientOptions = {}) {
     const machineId = options.credentials?.machine_id ?? `local-${randomUUID()}`;
     this.manager = new SessionManager(machineId, { ...(options.discovery_directory ? { directory: options.discovery_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
+    this.hooks = new HookIngestor(machineId, this.manager.registry);
     if (typeof options.opencode_url === "string" || options.opencode_managed) this.opencode = new OpenCodeManager(machineId, this.manager.registry, { ...(typeof options.opencode_url === "string" ? { url: options.opencode_url } : {}), ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
     const exportEnabled = options.opencode_export ?? (!options.opencode_managed && typeof options.opencode_url !== "string");
     if (options.opencode_url !== false && exportEnabled) this.opencode_exports = new OpenCodeExportDiscovery(machineId, this.manager.registry, {
@@ -75,9 +78,9 @@ export class HarnessControlClient {
       ...(options.claude_executable ? { executable: options.claude_executable } : {}), ...(options.claude_config_dir ? { config_dir: options.claude_config_dir } : {}),
       ...(options.claude_checkpoint_path ? { checkpoint_path: options.claude_checkpoint_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });
-    const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.codex_app_server?.target(id) ?? this.opencode_exports?.target(id) ?? this.codex_rollouts?.target(id) ?? this.claude_code?.target(id);
+    const target = (id: string) => this.manager.target(id) ?? this.opencode?.target(id) ?? this.codex_app_server?.target(id) ?? this.hooks.target(id) ?? this.opencode_exports?.target(id) ?? this.codex_rollouts?.target(id) ?? this.claude_code?.target(id);
     this.local_api = new LocalApi(this.manager.registry, { port: options.local_port ?? 41737, target,
-      harnesses: () => this.harnesses(), discovery_directory: this.manager.discovery.directory });
+      harnesses: () => this.harnesses(), discovery_directory: this.manager.discovery.directory, hooks: this.hooks });
     if (options.credentials && options.relay !== false) this.relay = new OutboundRelay(options.credentials, this.manager.registry, target, {
       createSession: async (command) => {
         if (command.harness_type === "opencode" && this.opencode) return this.opencode.createSession(command);

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { PendingInteraction, Session, SessionStatus, TranscriptEvent, TranscriptEventPayloadMap, TranscriptEventType } from "@rivetplane/shared/model";
 
-interface Entry { session: Session; transcript: TranscriptEvent[]; event_ids: Map<string, TranscriptEvent>; next_seq: number }
+interface Entry { session: Session; transcript: TranscriptEvent[]; event_ids: Map<string, TranscriptEvent>; next_seq: number; authority: number }
 
 export class SessionRegistry extends EventEmitter {
   #entries = new Map<string, Entry>();
@@ -11,11 +11,14 @@ export class SessionRegistry extends EventEmitter {
   list(): Session[] { return [...this.#entries.values()].map(({ session }) => structuredClone(session)); }
   get(id: string): Session | undefined { const value = this.#entries.get(id)?.session; return value ? structuredClone(value) : undefined; }
   transcript(id: string, since = 0, limit = 100): TranscriptEvent[] { return (this.#entries.get(id)?.transcript ?? []).filter((event) => event.seq > since).slice(0, limit).map((event) => structuredClone(event)); }
+  transcriptTail(id: string, limit: number): TranscriptEvent[] { const events = this.#entries.get(id)?.transcript ?? []; return events.slice(Math.max(0, events.length - limit)).map((event) => structuredClone(event)); }
 
-  upsert(session: Session): Session {
+  upsert(session: Session, options: { authority?: number } = {}): Session {
     const prior = this.#entries.get(session.id);
+    const authority = options.authority ?? 0;
+    if (prior && authority < prior.authority) return structuredClone(prior.session);
     if (prior && isDeepStrictEqual(prior.session, session)) return structuredClone(prior.session);
-    const entry: Entry = prior ? { ...prior, session: structuredClone(session) } : { session: structuredClone(session), transcript: [], event_ids: new Map(), next_seq: 1 };
+    const entry: Entry = prior ? { ...prior, session: structuredClone(session), authority: Math.max(prior.authority, authority) } : { session: structuredClone(session), transcript: [], event_ids: new Map(), next_seq: 1, authority };
     this.#entries.set(session.id, entry);
     this.emit("session", structuredClone(entry.session));
     return structuredClone(entry.session);

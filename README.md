@@ -13,6 +13,32 @@ npx rivetplane
 
 The login command uses `https://rivetplane.com`, opens Rivetplane in your browser, and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, OpenCode export discovery, the local API, and the outbound relay. Keep it running while you use Rivetplane. Use `--server` only for a self-hosted control plane.
 
+## Event-driven hooks
+
+Rivetplane can install native hook or plugin bridges for harness binaries that are present:
+
+```sh
+npx rivetplane hooks install
+npx rivetplane hooks install --harness claude-code
+```
+
+The installer prints a result for each harness. It skips a missing binary. It changes only marked Rivetplane entries or files and keeps unrelated user settings. It refuses to replace an unmarked standalone plugin or extension file.
+
+To remove the bridges:
+
+```sh
+npx rivetplane hooks uninstall
+npx rivetplane hooks uninstall --harness opencode
+```
+
+Set `RIVETPLANE_HOOKS_DISABLED=1` in one harness process to disable the bridge for that process. Set `RIVETPLANE_HOOK_ENDPOINT` only when the local API uses a non-default loopback port. A blocking bridge waits for about 120 seconds. It returns a neutral result after a timeout, so the native prompt stays available.
+
+Codex hooks are telemetry-only. Approval, question, message, and interrupt actions use only the supported Codex app-server. OpenCode live HTTP/SSE and plugin sessions report messages, interrupt, approval response, and question response. A read-only export record cannot replace these live capabilities.
+
+See the [checked harness capability matrix](docs/harness-capabilities.md) for exact support and official interface links.
+
+Use `npx rivetplane claude -- [CLAUDE_OPTIONS]` to start Claude Code with a temporary, wrapper-injected hook settings file. Rivetplane deletes that temporary file when Claude exits. Existing plain Claude Code sessions remain read-only.
+
 ## Existing Claude Code sessions
 
 Rivetplane discovers active Claude Code sessions machine-wide with `claude agents --json`. The command does not depend on Rivetplane's current directory. Rivetplane tails the matching files under `~/.claude/projects`, keeps bounded checkpoints, and excludes Claude subagents and sidechains from the top-level session list.

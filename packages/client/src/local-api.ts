@@ -4,8 +4,9 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
+import type { HookIngestor } from "./hook-ingestion.js";
 
-interface LocalApiOptions { port?: number; host?: "127.0.0.1" | "::1"; target(id: string): CommandTarget | undefined; harnesses?: () => HarnessDiscoveryStatus[]; discovery_directory?: string }
+interface LocalApiOptions { port?: number; host?: "127.0.0.1" | "::1"; target(id: string): CommandTarget | undefined; harnesses?: () => HarnessDiscoveryStatus[]; discovery_directory?: string; hooks?: HookIngestor }
 
 function send(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(`${JSON.stringify(value)}\n`);
@@ -44,6 +45,10 @@ export class LocalApi {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
       const method = request.method ?? "GET";
+      if (method === "POST" && url.pathname === "/v1/hooks/events") {
+        if (!this.options.hooks) { send(response, 404, { error: "Hook ingestion is disabled" }); return; }
+        send(response, 200, await this.options.hooks.ingest(await body(request))); return;
+      }
       if (method === "GET" && url.pathname === "/v1/harnesses") {
         send(response, 200, { harnesses: this.options.harnesses?.() ?? [], discovery_directory: this.options.discovery_directory ?? null }); return;
       }
