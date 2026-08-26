@@ -51,6 +51,8 @@ export interface OpenCodeExportDiscoveryOptions {
   index_interval_ms?: number;
   max_index_interval_ms?: number;
   timeout_ms?: number;
+  /** Timeout for the single machine-wide `opencode db` index query. */
+  database_timeout_ms?: number;
   /** Timeout for the heavier `opencode export` command. */
   export_timeout_ms?: number;
   max_output_bytes?: number;
@@ -381,19 +383,26 @@ export class OpenCodeExportDiscovery {
   }
   #indexInterval(): number { return this.#positiveLimit(this.options.index_interval_ms, 60_000, true); }
   async #refreshIndex(command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<void> {
-    const started = this.#now(); const scopes = await this.#projectScopes(command, common);
-    const listedResult = await this.#listAllScopes(scopes.directories, command, common);
-    let listed = listedResult.sessions; let databaseAuthoritative = false;
-    if (scopes.requiresIndex || !scopes.complete || !listedResult.authoritative || listedResult.saturated) {
+    const started = this.#now(); let listed: OpenCodeListSession[] = []; let authoritative = false;
+    // One machine-wide query avoids starting a competing OpenCode process for every
+    // known project. Injected command runners keep the legacy path unless a file
+    // runner is also supplied; this preserves deterministic adapter tests.
+    if (!this.options.runner || this.options.file_runner) {
       try {
-        listed = this.#mergeSessions(listed, await this.#listDatabasePages(common)); databaseAuthoritative = true;
-        this.#diagnostic(`OpenCode used the bounded database-index fallback and found ${listed.length} unique root sessions`);
+        listed = await this.#listDatabasePages({ ...common, timeout_ms: this.#positiveLimit(this.options.database_timeout_ms, 30_000) });
+        authoritative = true;
+        this.#diagnostic(`OpenCode machine index found ${listed.length} unique root session${listed.length === 1 ? "" : "s"}`);
       } catch (error) {
-        this.#diagnostic(`OpenCode database-index fallback failed; discovery coverage is partial: ${error instanceof Error ? error.message : String(error)}`, true);
+        this.#diagnostic(`OpenCode machine index is unavailable; using project-scope fallback: ${error instanceof Error ? error.message : String(error)}`, true);
       }
     }
+    if (!authoritative) {
+      const scopes = await this.#projectScopes(command, common);
+      const listedResult = await this.#listAllScopes(scopes.directories, command, common);
+      listed = listedResult.sessions;
+      authoritative = scopes.complete && listedResult.authoritative && !listedResult.saturated;
+    }
     listed.sort((a, b) => this.#updated(b) - this.#updated(a));
-    const authoritative = databaseAuthoritative || (scopes.complete && listedResult.authoritative && !listedResult.saturated);
     const next = authoritative ? new Map<string, OpenCodeListSession>() : new Map(this.#index);
     for (const session of listed) next.set(session.id, session);
     if (authoritative) for (const id of this.#present) if (!next.has(id)) this.registry.remove(id);
@@ -435,8 +444,8 @@ export class OpenCodeExportDiscovery {
     return { directories: [...scopes], complete, requiresIndex };
   }
   async #listAllScopes(scopes: string[], command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<{ sessions: OpenCodeListSession[]; authoritative: boolean; saturated: boolean }> {
-    const combined = new Map<string, OpenCodeListSession>(); let failures = 0; let duplicates = 0; let saturated = false;
-    await this.#mapLimit(scopes, this.options.concurrency ?? 4, async (directory) => {
+    const combined = new Map<string, OpenCodeListSession>(); const failures: Array<{ directory: string; message: string }> = []; let duplicates = 0; let saturated = false;
+    await this.#mapLimit(scopes, this.options.concurrency ?? 2, async (directory) => {
       try {
         const sessions = await this.#listScope(directory, command, common);
         if (sessions.length >= this.#scopeLimit()) saturated = true;
@@ -445,13 +454,17 @@ export class OpenCodeExportDiscovery {
           if (!prior || this.#updated(session) > this.#updated(prior)) combined.set(session.id, session);
         }
       } catch (error) {
-        failures++; this.registry.emit("warning", new Error(`Cannot list OpenCode sessions for ${directory}: ${error instanceof Error ? error.message : String(error)}`));
+        failures.push({ directory, message: error instanceof Error ? error.message : String(error) });
       }
     });
     if (duplicates > 0) this.#diagnostic(`OpenCode project discovery removed ${duplicates} duplicate session result${duplicates === 1 ? "" : "s"}`);
-    if (failures === 0) this.#diagnostic(`OpenCode machine discovery covered ${scopes.length} project scope${scopes.length === 1 ? "" : "s"} and found ${combined.size} unique session${combined.size === 1 ? "" : "s"}`);
-    else this.#diagnostic(`OpenCode machine discovery completed with ${failures} failed project scope${failures === 1 ? "" : "s"}; the database-index fallback was requested`, true);
-    return { sessions: [...combined.values()], authoritative: failures === 0, saturated };
+    if (failures.length === 0) this.#diagnostic(`OpenCode project fallback covered ${scopes.length} scope${scopes.length === 1 ? "" : "s"} and found ${combined.size} unique session${combined.size === 1 ? "" : "s"}`);
+    else {
+      const examples = failures.slice(0, 3).map((failure) => failure.directory).join(", ");
+      const reasons = [...new Set(failures.map((failure) => failure.message))].slice(0, 2).join("; ");
+      this.#diagnostic(`OpenCode project fallback could not scan ${failures.length} of ${scopes.length} scopes; cached sessions remain available. Example scopes: ${examples}. ${reasons}`, true);
+    }
+    return { sessions: [...combined.values()], authoritative: failures.length === 0, saturated };
   }
   async #listScope(directory: string, command: CommandRunner, common: { cwd: string; timeout_ms: number; max_output_bytes: number }): Promise<OpenCodeListSession[]> {
     const max = this.#scopeLimit();

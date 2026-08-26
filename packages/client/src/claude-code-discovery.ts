@@ -185,6 +185,7 @@ export class ClaudeCodeDiscovery {
   #diagnostics = new Set<string>();
   #pollFailures = 0;
   #nextPollAt = 0;
+  #lastPollFailure: string | undefined;
   #syncFailures = new Map<string, { attempts: number; next_attempt_at: number }>();
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: ClaudeCodeDiscoveryOptions = {}) {
@@ -215,6 +216,8 @@ export class ClaudeCodeDiscovery {
       }
       const result = await this.#command(runner, [...(this.options.executable_args ?? []), "agents", "--json"], common);
       const agents = parseClaudeAgents(result.stdout).filter((agent) => agent.kind !== "subagent" && agent.kind !== "sidechain");
+      if (this.#lastPollFailure) this.registry.emit("log", "Claude Code discovery recovered");
+      this.#lastPollFailure = undefined;
       this.#pollFailures = 0; this.#nextPollAt = 0;
       const found = new Set(agents.map((agent) => agent.sessionId));
       for (const id of this.#present) if (!found.has(id)) {
@@ -237,7 +240,9 @@ export class ClaudeCodeDiscovery {
       await this.#save();
     } catch (error) {
       const now = this.options.now?.() ?? Date.now(); const delay = this.#retryDelay(++this.#pollFailures); this.#nextPollAt = now + delay;
-      this.registry.emit("warning", new Error(`Claude Code discovery failed; retrying in ${Math.ceil(delay / 1_000)}s: ${error instanceof Error ? error.message : String(error)}`));
+      const failure = error instanceof Error ? error.message : String(error);
+      if (failure !== this.#lastPollFailure) this.registry.emit("warning", new Error(`Claude Code discovery failed; retrying in ${Math.ceil(delay / 1_000)}s: ${failure}`));
+      this.#lastPollFailure = failure;
     }
     finally { this.#polling = false; }
   }
