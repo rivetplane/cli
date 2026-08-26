@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { lstat, open } from "node:fs/promises";
 import type { JsonValue, PendingInteraction, SessionStatus } from "@rivetplane/shared/model";
 import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
@@ -48,6 +49,44 @@ function string(value: unknown): string | undefined { return typeof value === "s
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function timestamp(value: string | undefined): string { return value && !Number.isNaN(Date.parse(value)) ? value : new Date().toISOString(); }
 function summary(value: unknown, limit = 500): string { const raw = typeof value === "string" ? value : JSON.stringify(value); return (raw ?? "").slice(0, limit); }
+function cleanTitle(value: unknown): string | undefined {
+  const title = string(value)?.replace(/\s+/g, " ").trim();
+  return title ? title.slice(0, 160) : undefined;
+}
+function messageText(value: unknown): string | undefined {
+  if (typeof value === "string") return cleanTitle(value);
+  if (!Array.isArray(value)) return undefined;
+  return cleanTitle(value.flatMap((part) => {
+    const item = object(part);
+    return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
+  }).join(" "));
+}
+async function claudeTranscriptTitle(payload: Record<string, unknown>): Promise<string | undefined> {
+  const path = string(payload.transcript_path);
+  if (!path) return undefined;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) return undefined;
+    handle = await open(path, "r");
+    const buffer = Buffer.alloc(Math.min(info.size, 256 * 1024));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    let firstUser: string | undefined; let customTitle: string | undefined;
+    for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+      if (!line.trim()) continue;
+      let record: Record<string, unknown>;
+      try { record = object(JSON.parse(line)); } catch { continue; }
+      if (record.type === "custom-title") customTitle = cleanTitle(record.customTitle);
+      if (!firstUser && record.type === "user" && record.isMeta !== true) {
+        const message = object(record.message);
+        const candidate = message.role === "user" ? messageText(message.content) : undefined;
+        if (candidate && !candidate.startsWith("<local-command")) firstUser = candidate;
+      }
+    }
+    return customTitle ?? firstUser;
+  } catch { return undefined; }
+  finally { await handle?.close().catch(() => undefined); }
+}
 function eventId(input: NativeHookEnvelope): string {
   const cursor = input.cursor === undefined ? "" : String(input.cursor);
   const identity = `${input.harness}\0${input.session_id}\0${input.event}\0${input.request_id ?? ""}\0${cursor}\0${JSON.stringify(input.payload)}`;
@@ -111,6 +150,7 @@ export class HookIngestor {
     let input = validateHookEnvelope(raw);
     if (input.harness === "codex" && input.event === "PermissionRequest" && !input.request_id) input = withCodexTelemetryIdentity(input);
     validateVerifiedPayload(input);
+    if (isClaudeQuestionPermission(input)) return { decision: "approve" };
     if (input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion") input = { ...input, event: "AskUserQuestion" };
     const id = input.session_id; const ts = timestamp(input.timestamp); const mode = eventMode(input);
     const priorHarness = this.#harnesses.get(input.harness); const rank = (value: HookActionMode): number => value === "actionable" ? 3 : value === "telemetry" ? 2 : 1;
@@ -124,13 +164,15 @@ export class HookIngestor {
     }
     const prior = this.registry.get(id);
     if (this.#authoritativeTarget(input.harness, id)) return { decision: "neutral" };
+    const transcriptTitle = input.harness === "claude-code" ? await claudeTranscriptTitle(input.payload) : undefined;
+    const title = transcriptTitle ?? prior?.title;
     const clearTelemetry = shouldClearTelemetryPending(input, prior);
     const status = this.#status(input.event, prior?.status);
     this.registry.upsert({
       id, machine_id: this.machine_id, harness_type: input.harness, cwd: input.cwd, status,
       created_at: prior?.created_at ?? ts, last_activity_at: ts, pending: clearTelemetry ? null : prior?.pending ?? null,
       ...(input.model ? { model: parseModel(input.model) } : prior?.model ? { model: prior.model } : {}),
-      ...(input.agent ? { agent: input.agent } : prior?.agent ? { agent: prior.agent } : {}), read_only: harnessMode !== "actionable",
+      ...(input.agent ? { agent: input.agent } : prior?.agent ? { agent: prior.agent } : {}), ...(title ? { title } : {}), read_only: harnessMode !== "actionable",
       metadata: { ...object(prior?.metadata), transport: input.transport, hook_event: input.event, hook_mode: harnessMode, ...(clearTelemetry ? { hook_pending: null } : {}), ...(input.harness === "campfire" ? { role: "host" } : {}) } as JsonValue,
     }, { authority: harnessMode === "actionable" ? 80 : 40 });
 
@@ -239,6 +281,10 @@ function isToolStart(event: string): boolean { return /^(PreToolUse|beforeShellE
 function isToolEnd(event: string): boolean { return /^(PostToolUse|PostToolUseFailure|AfterTool|postToolUse|tool_execution_end)$/i.test(event); }
 function isResolution(event: string): boolean { return /replied|resolved|rejected|cancelled/i.test(event); }
 function waiterKey(sessionId: string, pendingId: string): string { return `${sessionId}\0${pendingId}`; }
+function isClaudeQuestionPermission(input: NativeHookEnvelope): boolean {
+  if (input.harness !== "claude-code" || input.event !== "PermissionRequest" || string(input.payload.tool_name) !== "AskUserQuestion") return false;
+  return Array.isArray(object(input.payload.tool_input).questions) && (object(input.payload.tool_input).questions as unknown[]).length > 0;
+}
 
 function validateVerifiedPayload(input: NativeHookEnvelope): void {
   if (!VERIFIED_EVENTS[input.harness]?.has(input.event)) throw new Error(`Harness hook interface is unsupported: ${input.harness}/${input.event}`);

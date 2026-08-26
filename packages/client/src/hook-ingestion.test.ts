@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { formatNativeResult, toHookEnvelope } from "./hook-bridge.js";
@@ -8,13 +9,20 @@ import { SessionRegistry } from "./registry.js";
 
 const fixture = async <T>(...parts: string[]): Promise<T> => JSON.parse(await readFile(join(process.cwd(), "src", "fixtures", "hooks", ...parts), "utf8")) as T;
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+const eventually = async (condition: () => boolean, timeoutMs = 1_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error("Condition was not met before the test timeout");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
 
 test("validates the official Claude PermissionRequest shape and exact bridge identity", async () => {
   const payload = await fixture<Record<string, unknown>>("claude-code", "permission-request.json");
   const envelope = toHookEnvelope("claude-code", "PermissionRequest", payload);
   assert.match(envelope.request_id ?? "", /^rivetplane-[0-9a-f-]{36}$/);
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 1_000);
-  const pending = hooks.ingest(envelope); await tick();
+  const pending = hooks.ingest(envelope); await eventually(() => registry.get(envelope.session_id)?.pending?.id === envelope.request_id);
   assert.equal(registry.get(envelope.session_id)?.pending?.id, envelope.request_id);
   assert.throws(() => hooks.respond(envelope.session_id, "wrong-id", "approve"), /no longer active/);
   hooks.respond(envelope.session_id, envelope.request_id!, "approve", "once");
@@ -23,11 +31,26 @@ test("validates the official Claude PermissionRequest shape and exact bridge ide
   assert.deepEqual(formatNativeResult("claude-code", "PermissionRequest", payload, result), { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedInput: payload.tool_input } } });
 });
 
-test("maps the official Claude multi-question payload to its answer object", async () => {
+test("passes the Claude question permission preflight, then maps options and a transcript title", async (t) => {
   const payload = await fixture<Record<string, unknown>>("claude-code", "ask-user-question.json");
+  const permission = await fixture<Record<string, unknown>>("claude-code", "permission-request.json");
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-claude-title-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const transcript = join(directory, "session.jsonl");
+  await writeFile(transcript, [
+    JSON.stringify({ type: "mode", sessionId: "claude-session-full" }),
+    JSON.stringify({ type: "user", sessionId: "claude-session-full", message: { role: "user", content: "  Plan   the release safely.  " } }),
+  ].join("\n"));
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 1_000);
-  const envelope = toHookEnvelope("claude-code", "PreToolUse", payload); const wait = hooks.ingest(envelope); await tick();
+  const preflightPayload = { ...permission, tool_name: "AskUserQuestion", tool_input: payload.tool_input, transcript_path: transcript };
+  assert.deepEqual(await hooks.ingest(toHookEnvelope("claude-code", "PermissionRequest", preflightPayload)), { decision: "approve" });
+  assert.equal(registry.get("claude-session-full"), undefined);
+  const now = new Date().toISOString();
+  registry.upsert({ id: "claude-session-full", machine_id: "machine-1", harness_type: "claude-code", cwd: "/repo", status: "running", created_at: now, last_activity_at: now, pending: null, title: "repo-a1" });
+  const questionPayload = { ...payload, transcript_path: transcript };
+  const envelope = toHookEnvelope("claude-code", "PreToolUse", questionPayload); const wait = hooks.ingest(envelope);
+  await eventually(() => registry.get(envelope.session_id)?.pending?.type === "question");
   const pending = registry.get(envelope.session_id)?.pending;
+  assert.equal(registry.get(envelope.session_id)?.title, "Plan the release safely.");
   assert.equal(pending?.id, "toolu_question_full");
   if (pending?.type === "question") { assert.deepEqual(pending.options, ["Safe", "Tests", "Lint"]); assert.equal(pending.questions?.[1]?.multiple, true); }
   hooks.respond(envelope.session_id, "toolu_question_full", '[["Safe"],["Tests","Lint"]]');
