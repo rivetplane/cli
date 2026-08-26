@@ -39,7 +39,10 @@ export async function installHookBridge(options: { env?: NodeJS.ProcessEnv; home
     prior = await readFile(installation.bridge, "utf8");
     if (!prior.includes(BRIDGE_MARKER)) throw new Error("Refused to overwrite an unmarked hook bridge");
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const source = durableHookBridgeSource();
+  const source = durableHookBridgeSource().replace(
+    "configuredTimeout : actionable ? 125000 : 3000",
+    "configuredTimeout : harness === \"opencode\" && actionable ? 1805000 : actionable ? 125000 : 3000",
+  );
   if (prior !== source) {
     const temporary = `${installation.bridge}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
     await writeFile(temporary, source, { encoding: "utf8", mode: 0o600, flag: "wx" });

@@ -62,7 +62,8 @@ test("installs only harnesses with checked official configuration and event fixt
   const plugin = await readFile(join(home, ".config", "opencode", "plugins", "rivetplane.ts"), "utf8");
   assert.match(plugin, /export const Rivetplane/); assert.match(plugin, /updated_input\?\.answers/); assert.match(plugin, /--owner/); assert.doesNotMatch(plugin, /http:\/\/127\.0\.0\.1:41737/);
   assert.doesNotMatch(plugin, /\["rivetplane"/); assert.match(plugin, new RegExp(JSON.stringify(defaultHookBridgePath({}, home)).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  const bridge = defaultHookBridgePath({}, home); assert.match(await readFile(bridge, "utf8"), /rivetplane-hook-v1:bridge-v1/);
+  const bridge = defaultHookBridgePath({}, home); const bridgeSource = await readFile(bridge, "utf8");
+  assert.match(bridgeSource, /rivetplane-hook-v1:bridge-v1/); assert.match(bridgeSource, /harness === "opencode" && actionable \? 1805000/);
   if (process.platform !== "win32") assert.equal((await stat(bridge)).mode & 0o077, 0);
   await uninstallHooks({ home, executable: async () => true, env: {} }); await assert.rejects(access(bridge), /ENOENT/);
 });

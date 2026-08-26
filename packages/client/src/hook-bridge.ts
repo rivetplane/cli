@@ -44,7 +44,9 @@ export async function emitHook(harness: string, event: string, options: { owner?
     if (!token) return {};
     const actionable = (harness === "claude-code" && event === "PermissionRequest") || (harness === "opencode" && (event === "permission.asked" || event === "question.asked"));
     const environmentTimeout = Number(process.env.RIVETPLANE_HOOK_TIMEOUT_MS);
-    const timeout = options.timeout_ms ?? (Number.isSafeInteger(environmentTimeout) && environmentTimeout > 0 ? environmentTimeout : actionable ? 125_000 : 3_000);
+    const timeout = options.timeout_ms ?? (Number.isSafeInteger(environmentTimeout) && environmentTimeout > 0
+      ? environmentTimeout
+      : harness === "opencode" && actionable ? 30 * 60_000 + 5_000 : actionable ? 125_000 : 3_000);
     const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", "x-rivetplane-hook-owner": HOOK_OWNER, "x-rivetplane-hook-token": token }, body: JSON.stringify(envelope), signal: AbortSignal.timeout(timeout) });
     if (!response.ok) return {};
     return formatNativeResult(harness, event, payload, await response.json() as HookBridgeResult);

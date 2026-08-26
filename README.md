@@ -31,7 +31,7 @@ npx rivetplane hooks uninstall
 npx rivetplane hooks uninstall --harness opencode
 ```
 
-Set `RIVETPLANE_HOOKS_DISABLED=1` in one harness process to disable the bridge for that process. A blocking bridge waits for about 120 seconds. It returns a neutral result after a timeout, so the native prompt stays available.
+Set `RIVETPLANE_HOOKS_DISABLED=1` in one harness process to disable the bridge for that process. OpenCode question and permission bridges wait for up to 30 minutes so a remote user has time to respond; Claude keeps its shorter native-hook window. A bridge returns a neutral result after a timeout, so the native prompt stays available.
 
 The installer writes a Rivetplane-owned Node bridge at `~/.config/harness-cp/hooks/v1/bridge.cjs`. Installed Claude and OpenCode hooks call this versioned local bridge with absolute, quoted paths. They do not need a global `rivetplane` binary, an npm cache entry, or network package access after `npx rivetplane hooks install` exits. A full uninstall removes the bridge. The client writes a private hook discovery and secret file at `~/.config/harness-cp/hook-endpoint.json`. Global hooks use it to find the current loopback port, including a custom port or port `0`. Each hook POST must have the Rivetplane owner marker and secret. Missing, malformed, stale, refused, or timed-out discovery returns the native neutral JSON `{}` with exit code 0, so the harness keeps its native prompt. Unsafe file ownership or permissions, symbolic links, and non-loopback endpoints are rejected. A new client replaces a record unless its endpoint proves its Rivetplane identity with the record secret; a reused live PID is not sufficient.
 

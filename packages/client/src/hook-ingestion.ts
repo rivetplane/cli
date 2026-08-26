@@ -6,7 +6,7 @@ import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 
 export const HOOK_PROTOCOL_VERSION = 1 as const;
-export const DEFAULT_HOOK_WAIT_MS = 120_000;
+export const DEFAULT_HOOK_WAIT_MS = 30 * 60_000;
 export const DEFAULT_CLAUDE_QUESTION_WAIT_MS = 15_000;
 
 export type HookActionMode = "actionable" | "telemetry" | "lifecycle";
