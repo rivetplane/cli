@@ -11,6 +11,7 @@ import { CodexAppServerManager } from "./codex-app-server.js";
 import { ClaudeCodeDiscovery } from "./claude-code-discovery.js";
 import { HookIngestor } from "./hook-ingestion.js";
 import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
+import type { HarnessDiscoveryStatus } from "./session-manager.js";
 
 export interface ClientOptions {
   credentials?: Credentials;
@@ -104,12 +105,45 @@ export class HarnessControlClient {
     ].filter((value): value is HarnessCapabilities => Boolean(value)));
   }
   harnesses() {
-    const result = new Map<string, ReturnType<SessionManager["harnesses"]>[number]>();
-    for (const item of [...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.claude_code?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? []), ...this.hooks.harnesses()]) {
-      const prior = result.get(item.harness_type); result.set(item.harness_type, prior ? { ...prior, ...item, discovered_sessions: prior.discovered_sessions + item.discovered_sessions, attached_sessions: prior.attached_sessions + item.attached_sessions } : item);
-    }
-    return [...result.values()];
+    return aggregateHarnessStatuses([...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.claude_code?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? []), ...this.hooks.harnesses()]);
   }
+}
+
+function capabilityRank(item: HarnessDiscoveryStatus): number {
+  const capabilities = item.capabilities;
+  if (!capabilities) return 0;
+  if (capabilities.live_attachment?.supported) return 3;
+  if (capabilities.discovery.mode === "read_write") return 2;
+  return 1;
+}
+
+export function aggregateHarnessStatuses(items: HarnessDiscoveryStatus[]): HarnessDiscoveryStatus[] {
+  interface Aggregate {
+    status: HarnessDiscoveryStatus;
+    discovered_ids: Set<string>;
+    attached_ids: Set<string>;
+    anonymous_discovered: number;
+    anonymous_attached: number;
+    capability_rank: number;
+  }
+  const result = new Map<string, Aggregate>();
+  for (const item of items) {
+    let aggregate = result.get(item.harness_type);
+    if (!aggregate) {
+      aggregate = { status: { harness_type: item.harness_type, discovered_sessions: 0, attached_sessions: 0 }, discovered_ids: new Set(), attached_ids: new Set(), anonymous_discovered: 0, anonymous_attached: 0, capability_rank: -1 };
+      result.set(item.harness_type, aggregate);
+    }
+    if (item.discovered_session_ids) for (const id of item.discovered_session_ids) aggregate.discovered_ids.add(id);
+    else aggregate.anonymous_discovered += item.discovered_sessions;
+    if (item.attached_session_ids) for (const id of item.attached_session_ids) aggregate.attached_ids.add(id);
+    else aggregate.anonymous_attached += item.attached_sessions;
+    const rank = capabilityRank(item);
+    if (rank > aggregate.capability_rank) {
+      aggregate.capability_rank = rank;
+      aggregate.status = { harness_type: item.harness_type, discovered_sessions: 0, attached_sessions: 0, ...(item.version ? { version: item.version } : {}), ...(item.capabilities ? { capabilities: item.capabilities } : {}) };
+    }
+  }
+  return [...result.values()].map((aggregate) => ({ ...aggregate.status, discovered_sessions: aggregate.discovered_ids.size + aggregate.anonymous_discovered, attached_sessions: aggregate.attached_ids.size + aggregate.anonymous_attached }));
 }
 
 export function preferCapabilities(reports: HarnessCapabilities[]): HarnessCapabilities[] {

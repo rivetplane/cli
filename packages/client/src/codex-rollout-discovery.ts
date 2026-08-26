@@ -123,7 +123,7 @@ export class CodexRolloutDiscovery {
   async start(): Promise<void> { await this.poll(); this.#timer = setInterval(() => void this.poll(), this.options.interval_ms ?? 2_000); this.#timer.unref(); }
   stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
   target(id: string): CommandTarget | undefined { return this.#present.has(id) && this.registry.get(id)?.read_only !== false ? new ReadOnlyCodexTarget() : undefined; }
-  harnesses(): HarnessDiscoveryStatus[] { return this.#available ? [{ harness_type: "codex", discovered_sessions: this.#present.size, attached_sessions: 0, capabilities: this.health() }] : []; }
+  harnesses(): HarnessDiscoveryStatus[] { return this.#available ? [{ harness_type: "codex", discovered_sessions: this.#present.size, attached_sessions: 0, discovered_session_ids: [...this.#present], attached_session_ids: [], capabilities: this.health() }] : []; }
   capabilities(): HarnessCapabilities | undefined {
     if (!this.#available) return undefined;
     const reason = "Codex rollout files are read-only; use 'rivetplane codex' for a managed app-server session";

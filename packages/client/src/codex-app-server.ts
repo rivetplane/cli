@@ -116,7 +116,10 @@ export class CodexAppServerManager {
     if (this.options.managed && this.#token_path) await unlink(this.#token_path).catch(() => undefined);
   }
   target(id: string): CommandTarget | undefined { return this.#online && this.#threads.has(id) ? new CodexTarget(this, id) : undefined; }
-  harnesses(): HarnessDiscoveryStatus[] { return this.#endpoint ? [{ harness_type: "codex", discovered_sessions: this.#threads.size, attached_sessions: this.#online ? this.#threads.size : 0, capabilities: this.health() }] : []; }
+  harnesses(): HarnessDiscoveryStatus[] {
+    const ids = [...this.#threads.keys()];
+    return this.#endpoint ? [{ harness_type: "codex", discovered_sessions: ids.length, attached_sessions: this.#online ? ids.length : 0, discovered_session_ids: ids, attached_session_ids: this.#online ? ids : [], capabilities: this.health() }] : [];
+  }
   health() {
     const support = (value: boolean, reason: string) => value ? { supported: true, mode: "read_write" as const } : { supported: false, mode: "unsupported" as const, reason };
     const offline = "The Codex app-server transport is not connected.";
@@ -157,6 +160,10 @@ export class CodexAppServerManager {
   async interrupt(threadId: string): Promise<void> {
     const state = this.#requireThread(threadId); if (!state.turn_id) throw new Error("Codex thread has no active turn to interrupt");
     await this.#request("turn/interrupt", { threadId, turnId: state.turn_id }); this.#operations.interrupt = true;
+  }
+  async setThreadName(threadId: string, name: string): Promise<void> {
+    this.#requireThread(threadId); await this.#request("thread/name/set", { threadId, name });
+    const current = this.registry.get(threadId); if (current) this.registry.upsert({ ...current, title: name });
   }
   async setCollaborationMode(threadId: string, mode: "default" | "plan"): Promise<void> {
     this.#requireThread(threadId);
@@ -303,6 +310,8 @@ export class CodexAppServerManager {
     this.#send({ id: rpcId, error: { code: -32601, message: `Unsupported server request: ${method}` } }); this.#diagnostic(method);
   }
   #notification(method: string, params: RecordValue): void {
+    // This official process-level notification has no session state for Rivetplane.
+    if (method === "remoteControl/status/changed") return;
     const threadId = string(params.threadId); if (method === "turn/started" && threadId) { const turn = object(params.turn); const state = this.#threads.get(threadId); if (state) state.turn_id = string(turn?.id); if (this.registry.get(threadId)) this.registry.setStatus(threadId, "running"); return; }
     if (method === "turn/completed" && threadId) { const turn = object(params.turn); const state = this.#threads.get(threadId); if (state) state.turn_id = undefined; if (this.registry.get(threadId)) this.registry.setStatus(threadId, string(turn?.status) === "failed" ? "error" : "waiting_input"); return; }
     if ((method === "item/completed" || method === "item/started") && threadId) { const item = object(params.item); if (item) this.#syncItem(threadId, item, number(params.completedAtMs ?? params.startedAtMs)); return; }

@@ -9,6 +9,10 @@ export interface HarnessDiscoveryStatus {
   harness_type: string;
   discovered_sessions: number;
   attached_sessions: number;
+  /** Internal identities used to merge overlapping discovery transports. */
+  discovered_session_ids?: readonly string[];
+  /** Internal identities used to merge overlapping live transports. */
+  attached_session_ids?: readonly string[];
   version?: string;
   capabilities?: {
     persisted_discovery?: CapabilitySupport;
