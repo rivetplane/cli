@@ -545,6 +545,11 @@ export class OpenCodeExportDiscovery {
     const newer = checkpoint.updated === undefined || (currentEpoch !== undefined && priorEpoch !== undefined ? currentEpoch > priorEpoch : exportUpdated !== undefined && exportUpdated !== checkpoint.updated);
     const pending = foundPending ?? (checkpoint.pending && !terminal.has(checkpoint.pending.id) && !newer ? checkpoint.pending : undefined); const identity = latestIdentity(messages);
     const current = this.registry.get(id); const time = object(info.time);
+    const currentMetadata = object(current?.metadata) ?? {}; const hookPending = object(currentMetadata.hook_pending) ?? {};
+    const livePluginPending = currentMetadata.transport === "opencode-plugin"
+      && currentMetadata.hook_mode === "actionable"
+      && current?.pending?.read_only !== true
+      && hookPending.id === current?.pending?.id;
     this.registry.upsert({ id, machine_id: this.machine_id, harness_type: "opencode", cwd: string(info.directory) ?? listed.directory ?? current?.cwd ?? "",
       status: current?.status ?? "waiting_input", created_at: timestamp(time?.created ?? listed.created), last_activity_at: timestamp(time?.updated ?? listed.updated ?? time?.created),
       pending: current?.pending ?? null, title: string(info.title) ?? listed.title, ...identity, read_only: true,
@@ -553,7 +558,9 @@ export class OpenCodeExportDiscovery {
     if (pending?.type === "approval" && checkpoint.pending?.id !== pending.id) this.registry.append(id, "permission_request", {
       approval_id: pending.id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary,
     }, { id: stableId(id, pending.id, "permission_request"), ts: pending.requested_at });
-    this.registry.setPending(id, pending ?? null); this.registry.setStatus(id, statusFromExport(info, messages, pending));
+    if (!livePluginPending) {
+      this.registry.setPending(id, pending ?? null); this.registry.setStatus(id, statusFromExport(info, messages, pending));
+    }
     checkpoint.updated = exportUpdated; checkpoint.pending = pending;
     this.#checkpoints.sessions[id] = checkpoint;
   }
