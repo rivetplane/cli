@@ -198,12 +198,13 @@ test("detects successful output truncated at exactly 64 KiB and retries with fil
 });
 
 test("uses bounded database pages when a project scope reaches its safe list limit", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-db-pages-")); let databaseCalls = 0;
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-db-pages-")); let databaseCalls = 0; let scopeCalls = 0; const databaseTimeouts: number[] = [];
   const listed = [{ id: "ses_1", directory, created: 1, updated: 3 }, { id: "ses_2", directory, created: 1, updated: 2 }];
   const indexed = [...listed, { id: "ses_3", directory, created: 1, updated: 1 }];
-  const runner: CommandRunner = async (_program, args) => args[0] === "debug" ? { stdout: JSON.stringify([{ id: "p1", worktree: directory, sandboxes: [] }]), stderr: "" } : { stdout: JSON.stringify(listed), stderr: "" };
-  const fileRunner: CommandRunner = async (_program, args) => {
+  const runner: CommandRunner = async (_program, args) => { scopeCalls++; return args[0] === "debug" ? { stdout: JSON.stringify([{ id: "p1", worktree: directory, sandboxes: [] }]), stderr: "" } : { stdout: JSON.stringify(listed), stderr: "" }; };
+  const fileRunner: CommandRunner = async (_program, args, options) => {
     if (args[0] === "db") {
+      databaseTimeouts.push(options.timeout_ms);
       databaseCalls++; const offset = Number(/OFFSET (\d+)/.exec(String(args[1]))?.[1] ?? 0);
       return { stdout: JSON.stringify(indexed.slice(offset, offset + 2)), stderr: "" };
     }
@@ -211,7 +212,7 @@ test("uses bounded database pages when a project scope reaches its safe list lim
   };
   try {
     const registry = new SessionRegistry(); const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner, max_sessions_per_project: 2, database_page_size: 2 });
-    await manager.poll(); assert.deepEqual(registry.list().map((session) => session.id).sort(), ["ses_1", "ses_2", "ses_3"]); assert.equal(databaseCalls, 2); manager.stop();
+    await manager.poll(); assert.deepEqual(registry.list().map((session) => session.id).sort(), ["ses_1", "ses_2", "ses_3"]); assert.equal(databaseCalls, 2); assert.equal(scopeCalls, 0); assert.deepEqual(databaseTimeouts, [30_000, 30_000]); manager.stop();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -230,9 +231,9 @@ test("caches thousands of indexed sessions across repeated transcript polls", as
   try {
     const logs: string[] = []; const registry = new SessionRegistry(); registry.on("log", (message) => logs.push(String(message)));
     const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory, checkpoint_path: join(directory, "cp.json"), runner, file_runner: fileRunner, now: () => now, index_interval_ms: 60_000, max_exports_per_poll: 4, max_export_candidates: 16 });
-    await manager.poll(); assert.equal(registry.list().length, 4); assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 4);
+    await manager.poll(); assert.equal(registry.list().length, 4); assert.equal(projectCalls, 0); assert.equal(listCalls, 0); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 4);
     for (let poll = 0; poll < 5; poll++) { now += 2_000; await manager.poll(); }
-    assert.equal(projectCalls, 1); assert.equal(listCalls, 1); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 16); assert.equal(registry.list().length, 0);
+    assert.equal(projectCalls, 0); assert.equal(listCalls, 0); assert.equal(databaseCalls, 3); assert.equal(exportCalls, 16); assert.equal(registry.list().length, 0);
     assert.deepEqual(manager.harnesses(), [{ harness_type: "opencode", discovered_sessions: 2_501, attached_sessions: 0 }]);
     assert.deepEqual({ harness_type: manager.capabilities()?.harness_type, can_create_session: manager.capabilities()?.can_create_session, transport: manager.capabilities()?.transport }, { harness_type: "opencode", can_create_session: false, transport: "opencode-cli-export" });
     assert.equal(manager.capabilities()?.session_capabilities?.discovery.mode, "read_only");
@@ -240,6 +241,27 @@ test("caches thousands of indexed sessions across repeated transcript polls", as
     assert.equal(logs.some((message) => message.includes("16 active, recent, or probe candidates") && message.includes("selected 16") && message.includes("exporting 4")), true);
     assert.equal(logs.some((message) => message.includes("0 active, recent, or probe candidates") && message.includes("exporting 0")), true); manager.stop();
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("aggregates project-scope timeouts when the machine index is unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-opencode-fallback-warning-")); const directories = [root, join(root, "a"), join(root, "b")];
+  await Promise.all(directories.slice(1).map((directory) => mkdir(directory))); const warnings: string[] = [];
+  const runner: CommandRunner = async (_program, args) => {
+    if (args[0] === "debug") return { stdout: JSON.stringify(directories.map((directory, index) => ({ id: `p${index}`, worktree: directory, sandboxes: [] }))), stderr: "" };
+    throw new Error("OpenCode command timed out after 10000 ms");
+  };
+  const fileRunner: CommandRunner = async (_program, args) => {
+    if (args[0] === "db") throw new Error("OpenCode command timed out after 30000 ms");
+    throw new Error("unexpected file command");
+  };
+  try {
+    const registry = new SessionRegistry(); registry.on("warning", (warning) => warnings.push(String(warning)));
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, directory: root, checkpoint_path: join(root, "cp.json"), runner, file_runner: fileRunner });
+    await manager.poll();
+    assert.equal(warnings.filter((warning) => warning.includes("project fallback could not scan")).length, 1);
+    assert.equal(warnings.some((warning) => warning.includes("3 of 3 scopes") && warning.includes("cached sessions remain available")), true);
+    assert.equal(warnings.some((warning) => warning.includes("Cannot list OpenCode sessions for")), false); manager.stop();
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("finds a new pending session within the configured index refresh bound", async () => {

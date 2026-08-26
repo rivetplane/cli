@@ -92,15 +92,16 @@ test("runs discovery through a fake Claude process", async () => {
 });
 
 test("bounds active-session sync and backs off failed discovery polls", async () => {
-  const env = await setup(); let now = 1_000; let calls = 0; let fail = false;
+  const env = await setup(); let now = 1_000; let calls = 0; let fail = false; const warnings: string[] = [];
   const agents = Array.from({ length: 4 }, (_, index): ClaudeAgent => ({ sessionId: `${index}`.padStart(8, "0") + "-2222-4333-8444-555555555555", cwd: env.root, kind: "interactive", startedAt: index }));
   const boundedRunner: NonNullable<ClaudeCodeDiscoveryOptions["runner"]> = async (_program, args) => {
     if (args.includes("--version")) return { stdout: "2.1.245\n", stderr: "" };
     calls++; if (fail) throw new Error("temporary failure"); return { stdout: JSON.stringify(agents), stderr: "" };
   };
   try {
-    const registry = new SessionRegistry(); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "bounded.json"), runner: boundedRunner, max_sessions: 2, now: () => now, retry_base_ms: 100 });
+    const registry = new SessionRegistry(); registry.on("warning", (warning) => warnings.push(String(warning))); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "bounded.json"), runner: boundedRunner, max_sessions: 2, now: () => now, retry_base_ms: 100 });
     await manager.poll(); assert.equal(registry.list().length, 2); assert.equal(manager.harnesses()[0]?.discovered_sessions, 4); assert.equal(manager.harnesses()[0]?.attached_sessions, 2);
-    fail = true; await manager.poll(); assert.equal(calls, 2); await manager.poll(); assert.equal(calls, 2); now += 100; await manager.poll(); assert.equal(calls, 3); manager.stop();
+    fail = true; await manager.poll(); assert.equal(calls, 2); await manager.poll(); assert.equal(calls, 2); now += 100; await manager.poll(); assert.equal(calls, 3);
+    now += 200; await manager.poll(); assert.equal(calls, 4); assert.equal(warnings.filter((warning) => warning.includes("Claude Code discovery failed")).length, 1); manager.stop();
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });
