@@ -260,8 +260,11 @@ export class ClaudeCodeDiscovery {
       const questions = Object.values(checkpoint.open_tools).filter((tool) => tool.name === "AskUserQuestion").map((tool) => questionFromTool(agent.sessionId, tool, state)).filter((value): value is Question => Boolean(value));
       if (questions.length === 1) pending = questions[0];
     } else if (wait.includes("permission")) pending = explicitApproval(agent.sessionId, state);
-    const currentPending = this.registry.get(agent.sessionId)?.pending ?? null;
-    if (JSON.stringify(currentPending) !== JSON.stringify(pending ?? null)) this.registry.setPending(agent.sessionId, pending ?? null);
+    const currentSession = this.registry.get(agent.sessionId); const currentPending = currentSession?.pending ?? null;
+    const hookMarker = object(object(currentSession?.metadata)?.hook_pending);
+    const hookPending = currentPending && string(hookMarker?.id) === currentPending.id ? currentPending : null;
+    const nextPending = pending ?? hookPending;
+    if (JSON.stringify(currentPending) !== JSON.stringify(nextPending)) this.registry.setPending(agent.sessionId, nextPending);
     this.registry.setStatus(agent.sessionId, statusFromAgent(agent));
     const current = this.registry.get(agent.sessionId); if (current) this.registry.upsert({ ...current, last_activity_at: observedActivity });
     this.#checkpoints.sessions[agent.sessionId] = checkpoint;

@@ -31,7 +31,20 @@ test("authenticates outbound relay, sends state, and applies inbound commands", 
   } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
-test("sends snapshots and capabilities before bounded round-robin replay", async () => {
+test("reports relay frame rejections from the server", async () => {
+  const server = createServer(); const wss = new WebSocketServer({ server });
+  wss.on("connection", (socket) => socket.on("message", (raw) => {
+    const message = JSON.parse(raw.toString()) as { type?: string };
+    if (message.type === "machine.hello") socket.send(JSON.stringify({ type: "relay.error", error: "Session payload is invalid" }));
+  }));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, new SessionRegistry(), () => undefined);
+  let warning = ""; relay.on("warning", (error) => { warning = error instanceof Error ? error.message : String(error); });
+  try { relay.start(); await until(() => warning.length > 0); assert.match(warning, /Session payload is invalid/); }
+  finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+test("sends recent snapshots and capabilities before bounded round-robin replay", async () => {
   const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
   wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
@@ -44,12 +57,30 @@ test("sends snapshots and capabilities before bounded round-robin replay", async
     capabilities: () => [{ machine_id: "m1", harness_type: "opencode", can_create_session: false, directories: ["/tmp"], models: [], reported_at: new Date().toISOString() }],
   });
   try {
-    relay.start(); await until(() => received.filter((message) => message.type === "transcript.append").length === 1_000);
+    relay.start(); await until(() => received.filter((message) => message.type === "transcript.append").length === 40);
     const firstTranscript = received.findIndex((message) => message.type === "transcript.append");
     assert.ok(received.slice(0, firstTranscript).filter((message) => message.type === "session.upsert").length === 2);
     assert.ok(received.slice(0, firstTranscript).some((message) => message.type === "harness.capabilities"));
     const firstFour = received.filter((message) => message.type === "transcript.append").slice(0, 4).map((message) => ((message.event as { payload: { text: string } }).payload.text));
-    assert.deepEqual(firstFour, ["s1-10", "s2-10", "s1-11", "s2-11"]);
-    assert.equal(received.filter((message) => message.type === "transcript.append").length, 1_000);
+    assert.deepEqual(firstFour, ["s2-490", "s1-490", "s2-491", "s1-491"]);
+    assert.equal(received.filter((message) => message.type === "transcript.append").length, 40);
+  } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+test("caps reconnect snapshots and sends pending sessions first", async () => {
+  const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
+  wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+  const registry = new SessionRegistry(); const base = Date.parse("2026-01-01T00:00:00Z");
+  for (let index = 0; index < 300; index++) {
+    const at = new Date(base + index).toISOString(); const pending = index === 0 ? { type: "question" as const, id: "q-old", session_id: "s0", prompt: "Old but pending", requested_at: at } : null;
+    registry.upsert({ id: `s${index}`, machine_id: "m1", harness_type: "test", cwd: "/tmp", status: pending ? "waiting_input" : "completed", created_at: at, last_activity_at: at, pending });
+  }
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined);
+  try {
+    relay.start(); await until(() => received.filter((message) => message.type === "session.upsert").length === 32);
+    const snapshots = received.filter((message) => message.type === "session.upsert");
+    assert.equal((snapshots[0]?.session as { id: string }).id, "m1/test/s0");
+    assert.equal(snapshots.some((message) => (message.session as { id: string }).id === "m1/test/s299"), true);
   } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });

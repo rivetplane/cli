@@ -54,6 +54,19 @@ test("fails closed for an observed permission wait without an exact request ID",
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });
 
+test("does not clear a question supplied by the live Claude hook", async () => {
+  const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json")); agents[0] = { ...agents[0]!, waitingFor: undefined, state: "working" };
+  const requestedAt = "2026-08-25T15:41:40.000Z"; const pending = { type: "question" as const, id: "hook-question-1", session_id: sessionId, prompt: "Choose a lane", options: ["Stable", "Beta"], requested_at: requestedAt };
+  try {
+    const registry = new SessionRegistry();
+    registry.upsert({ id: sessionId, machine_id: "machine-1", harness_type: "claude-code", cwd: "/private/tmp/claude-project", status: "waiting_input", created_at: requestedAt, last_activity_at: requestedAt, pending, metadata: { hook_pending: { id: pending.id } } }, { authority: 80 });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "hook-pending.json"), runner: runner(() => agents) });
+    await manager.poll();
+    assert.deepEqual(registry.get(sessionId)?.pending, pending);
+    manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
 test("accepts only an explicit exact-ID approval state and handles transcript truncation", async () => {
   const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json")); agents[0] = { ...agents[0]!, waitingFor: "permission prompt" };
   await writeFile(env.state, JSON.stringify({ sessionId, updatedAt: "2026-08-25T15:41:40.233Z", block: { permission: { id: "perm_exact_1", toolName: "Bash", input: { command: "touch proof" }, requestedAt: "2026-08-25T15:41:40.000Z" } } }));

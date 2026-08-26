@@ -126,11 +126,17 @@ export interface CreateSessionCommand {
   model: { provider_id: string; model_id: string };
 }
 
+export interface RelayErrorMessage {
+  type: "relay.error";
+  error: string;
+}
+
 export type ServerToClientMessage =
   | SendMessageCommand
   | RespondToPendingCommand
   | InterruptSessionCommand
-  | CreateSessionCommand;
+  | CreateSessionCommand
+  | RelayErrorMessage;
 
 /** Backwards-compatible name used by server command routing. */
 export type RelayCommand = ServerToClientMessage;

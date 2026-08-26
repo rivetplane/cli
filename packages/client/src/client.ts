@@ -95,6 +95,7 @@ export class HarnessControlClient {
       },
       capabilities: () => this.capabilityReports(),
     });
+    this.relay?.on("warning", (error) => this.manager.registry.emit("warning", error));
     this.manager.registry.on("warning", (error) => this.manager.registry.emit("log", `Warning: ${error instanceof Error ? error.message : String(error)}`));
   }
 

@@ -31,7 +31,7 @@ test("validates the official Claude PermissionRequest shape and exact bridge ide
   assert.deepEqual(formatNativeResult("claude-code", "PermissionRequest", payload, result), { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow", updatedInput: payload.tool_input } } });
 });
 
-test("passes the Claude question permission preflight, then maps options and a transcript title", async (t) => {
+test("answers a Claude question through PermissionRequest and observes native fallback without blocking", async (t) => {
   const payload = await fixture<Record<string, unknown>>("claude-code", "ask-user-question.json");
   const permission = await fixture<Record<string, unknown>>("claude-code", "permission-request.json");
   const directory = await mkdtemp(join(tmpdir(), "rivetplane-claude-title-")); t.after(() => rm(directory, { recursive: true, force: true }));
@@ -42,22 +42,42 @@ test("passes the Claude question permission preflight, then maps options and a t
   ].join("\n"));
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 1_000);
   const preflightPayload = { ...permission, tool_name: "AskUserQuestion", tool_input: payload.tool_input, transcript_path: transcript };
-  assert.deepEqual(await hooks.ingest(toHookEnvelope("claude-code", "PermissionRequest", preflightPayload)), { decision: "approve" });
-  assert.equal(registry.get("claude-session-full"), undefined);
-  const now = new Date().toISOString();
-  registry.upsert({ id: "claude-session-full", machine_id: "machine-1", harness_type: "claude-code", cwd: "/repo", status: "running", created_at: now, last_activity_at: now, pending: null, title: "repo-a1" });
+  const permissionEnvelope = toHookEnvelope("claude-code", "PermissionRequest", preflightPayload);
+  const permissionWait = hooks.ingest(permissionEnvelope);
+  await eventually(() => registry.get(permissionEnvelope.session_id)?.pending?.type === "question");
+  const permissionPending = registry.get(permissionEnvelope.session_id)?.pending;
+  assert.equal(registry.get(permissionEnvelope.session_id)?.title, "Plan the release safely.");
+  assert.equal(permissionPending?.id, permissionEnvelope.request_id);
+  assert.equal((registry.get(permissionEnvelope.session_id)?.metadata as { hook_pending?: { id?: string } } | undefined)?.hook_pending?.id, permissionEnvelope.request_id);
+  if (permissionPending?.type === "question") { assert.deepEqual(permissionPending.options, ["Safe", "Tests", "Lint"]); assert.equal(permissionPending.questions?.[1]?.multiple, true); }
+  hooks.respond(permissionEnvelope.session_id, permissionEnvelope.request_id!, '[["Safe"],["Tests","Lint"]]');
+  const result = await permissionWait;
+  assert.deepEqual(result.updated_input, { answers: { "Which mode?": "Safe", "Which checks?": "Tests, Lint" } });
+  const native = formatNativeResult("claude-code", "PermissionRequest", preflightPayload, result) as { hookSpecificOutput: { decision: { updatedInput: Record<string, unknown> } } };
+  assert.deepEqual((native.hookSpecificOutput.decision.updatedInput as { answers: unknown }).answers, { "Which mode?": "Safe", "Which checks?": "Tests, Lint" });
+
   const questionPayload = { ...payload, transcript_path: transcript };
-  const envelope = toHookEnvelope("claude-code", "PreToolUse", questionPayload); const wait = hooks.ingest(envelope);
-  await eventually(() => registry.get(envelope.session_id)?.pending?.type === "question");
+  const envelope = toHookEnvelope("claude-code", "PreToolUse", questionPayload);
+  assert.deepEqual(await hooks.ingest(envelope), { decision: "neutral" });
   const pending = registry.get(envelope.session_id)?.pending;
   assert.equal(registry.get(envelope.session_id)?.title, "Plan the release safely.");
   assert.equal(pending?.id, "toolu_question_full");
-  if (pending?.type === "question") { assert.deepEqual(pending.options, ["Safe", "Tests", "Lint"]); assert.equal(pending.questions?.[1]?.multiple, true); }
-  hooks.respond(envelope.session_id, "toolu_question_full", '[["Safe"],["Tests","Lint"]]');
-  const result = await wait;
-  assert.deepEqual(result.updated_input, { answers: { "Which mode?": "Safe", "Which checks?": "Tests, Lint" } });
-  const native = formatNativeResult("claude-code", "PreToolUse", payload, result) as { hookSpecificOutput: { updatedInput: Record<string, unknown> } };
-  assert.deepEqual((native.hookSpecificOutput.updatedInput as { answers: unknown }).answers, { "Which mode?": "Safe", "Which checks?": "Tests, Lint" });
+  assert.equal(pending?.read_only, true);
+  assert.equal(hooks.target(envelope.session_id), undefined);
+});
+
+test("keeps a timed-out Claude question visible as local-only pending state", async () => {
+  const question = await fixture<Record<string, unknown>>("claude-code", "ask-user-question.json");
+  const permission = await fixture<Record<string, unknown>>("claude-code", "permission-request.json");
+  const payload = { ...permission, tool_name: "AskUserQuestion", tool_input: question.tool_input };
+  const envelope = toHookEnvelope("claude-code", "PermissionRequest", payload);
+  const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 20);
+  assert.deepEqual(await hooks.ingest(envelope), { decision: "neutral" });
+  const pending = registry.get(envelope.session_id)?.pending;
+  assert.equal(pending?.type, "question");
+  assert.equal(pending?.read_only, true);
+  assert.equal(registry.get(envelope.session_id)?.status, "waiting_input");
+  assert.equal(hooks.target(envelope.session_id), undefined);
 });
 
 test("normalizes official OpenCode permission and multi-question event fixtures", async () => {

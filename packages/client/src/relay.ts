@@ -8,7 +8,16 @@ import { SessionRegistry } from "./registry.js";
 export interface CommandTarget { sendMessage(text: string): Promise<void>; respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void | Promise<void>; interrupt(): void | Promise<void> }
 interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[] }
 
-const REPLAY_LIMIT_PER_SESSION = 500;
+const SNAPSHOT_SESSION_LIMIT = 32;
+const REPLAY_LIMIT_PER_SESSION = 20;
+const REPLAY_EVENT_LIMIT = 200;
+
+function snapshotSessions(registry: SessionRegistry): Session[] {
+  return registry.list().sort((left, right) => {
+    const pending = Number(Boolean(right.pending)) - Number(Boolean(left.pending));
+    return pending || Date.parse(right.last_activity_at) - Date.parse(left.last_activity_at);
+  }).slice(0, SNAPSHOT_SESSION_LIMIT);
+}
 
 function relayUrl(server: string): string {
   const url = new URL(server); url.protocol = url.protocol === "https:" ? "wss:" : "ws:"; url.pathname = `${url.pathname.replace(/\/$/, "")}/v1/relay`; return url.toString();
@@ -52,7 +61,7 @@ export class OutboundRelay extends EventEmitter {
       const now = new Date().toISOString();
       const machine: Machine = { id: this.credentials.machine_id, name: this.credentials.machine_name, owner_account_id: this.credentials.owner_account_id, last_seen_at: now, status: "online" };
       socket.send(JSON.stringify({ type: "machine.hello", protocol_version: 1, machine } satisfies ClientToServerMessage));
-      const sessions = this.registry.list();
+      const sessions = snapshotSessions(this.registry);
       for (const session of sessions) {
         socket.send(JSON.stringify({ type: "session.upsert", session: this.#namespace(session) } satisfies ClientToServerMessage));
       }
@@ -63,14 +72,15 @@ export class OutboundRelay extends EventEmitter {
       // Replay a bounded, round-robin tail. The server deduplicates event IDs.
       // A large backlog from one harness cannot delay all other sessions.
       const replays = sessions.map((session) => ({ session, events: this.registry.transcriptTail(session.id, REPLAY_LIMIT_PER_SESSION), offset: 0 }));
-      let pending = true;
-      while (pending) {
+      let pending = true; let sent = 0;
+      while (pending && sent < REPLAY_EVENT_LIMIT) {
         pending = false;
         for (const replay of replays) {
           const event = replay.events[replay.offset++];
           if (!event) continue;
           pending = true;
           socket.send(JSON.stringify({ type: "transcript.append", event: { ...event, session_id: this.#externalId(replay.session) } } satisfies ClientToServerMessage));
+          if (++sent >= REPLAY_EVENT_LIMIT) break;
         }
       }
       this.#heartbeat = setInterval(() => { this.send({ type: "machine.heartbeat", machine_id: machine.id, sent_at: new Date().toISOString() });
@@ -88,6 +98,7 @@ export class OutboundRelay extends EventEmitter {
   async #command(raw: string): Promise<void> {
     let command: ServerToClientMessage;
     try { command = JSON.parse(raw) as ServerToClientMessage; } catch { this.emit("warning", new Error("Relay sent invalid JSON")); return; }
+    if (command.type === "relay.error") { this.emit("warning", new Error(`Relay rejected a frame: ${command.error}`)); return; }
     if (command.type !== "command.send_message" && command.type !== "command.respond_to_pending" && command.type !== "command.interrupt_session" && command.type !== "command.create_session") return;
     if (command.type === "command.create_session") {
       try { const session_id = await this.options.createSession?.(command); if (!session_id) throw new Error("Harness cannot create sessions");

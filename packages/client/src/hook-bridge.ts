@@ -42,7 +42,7 @@ export async function emitHook(harness: string, event: string, options: { owner?
     const endpoint = validateHookEndpoint(configuredEndpoint ?? discovery?.endpoint);
     const token = configuredToken ?? discovery?.token;
     if (!token) return {};
-    const actionable = (harness === "claude-code" && (event === "PermissionRequest" || event === "PreToolUse" && payload.tool_name === "AskUserQuestion")) || (harness === "opencode" && (event === "permission.asked" || event === "question.asked"));
+    const actionable = (harness === "claude-code" && event === "PermissionRequest") || (harness === "opencode" && (event === "permission.asked" || event === "question.asked"));
     const environmentTimeout = Number(process.env.RIVETPLANE_HOOK_TIMEOUT_MS);
     const timeout = options.timeout_ms ?? (Number.isSafeInteger(environmentTimeout) && environmentTimeout > 0 ? environmentTimeout : actionable ? 125_000 : 3_000);
     const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", "x-rivetplane-hook-owner": HOOK_OWNER, "x-rivetplane-hook-token": token }, body: JSON.stringify(envelope), signal: AbortSignal.timeout(timeout) });
@@ -55,7 +55,7 @@ export function formatNativeResult(harness: string, event: string, input: Record
   if (result.decision === "neutral") return {};
   if (harness === "opencode") return result;
   if (harness === "claude-code" && event === "PermissionRequest") {
-    const decision = result.decision === "deny" ? { behavior: "deny", message: "Denied through Rivetplane" } : { behavior: "allow", updatedInput: object(input.tool_input) };
+    const decision = result.decision === "deny" ? { behavior: "deny", message: "Denied through Rivetplane" } : { behavior: "allow", updatedInput: { ...object(input.tool_input), ...object(result.updated_input) } };
     return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision } };
   }
   if (harness === "claude-code" && (event === "AskUserQuestion" || (event === "PreToolUse" && input.tool_name === "AskUserQuestion")) && result.decision === "answer") {

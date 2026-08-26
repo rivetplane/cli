@@ -7,6 +7,7 @@ import { SessionRegistry } from "./registry.js";
 
 export const HOOK_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_HOOK_WAIT_MS = 120_000;
+export const DEFAULT_CLAUDE_QUESTION_WAIT_MS = 15_000;
 
 export type HookActionMode = "actionable" | "telemetry" | "lifecycle";
 
@@ -150,8 +151,9 @@ export class HookIngestor {
     let input = validateHookEnvelope(raw);
     if (input.harness === "codex" && input.event === "PermissionRequest" && !input.request_id) input = withCodexTelemetryIdentity(input);
     validateVerifiedPayload(input);
-    if (isClaudeQuestionPermission(input)) return { decision: "approve" };
-    if (input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion") input = { ...input, event: "AskUserQuestion" };
+    const claudeQuestionPermission = isClaudeQuestionPermission(input);
+    const claudeQuestionObservation = input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion";
+    if (claudeQuestionPermission || claudeQuestionObservation) input = { ...input, event: "AskUserQuestion" };
     const id = input.session_id; const ts = timestamp(input.timestamp); const mode = eventMode(input);
     const priorHarness = this.#harnesses.get(input.harness); const rank = (value: HookActionMode): number => value === "actionable" ? 3 : value === "telemetry" ? 2 : 1;
     if (!priorHarness || rank(mode) >= rank(priorHarness.mode)) this.#harnesses.set(input.harness, { cwd: input.cwd, transport: input.transport, mode });
@@ -189,23 +191,31 @@ export class HookIngestor {
       output: safeJson(input.payload.tool_response ?? input.payload.tool_output ?? input.payload.output), is_error: /failure|error/i.test(input.event) || Boolean(input.payload.error),
     }, idempotency);
 
-    const pending = this.#pending(input, ts);
+    const pending = this.#pending(input, ts, claudeQuestionObservation);
     if (!pending) {
       if (isResolution(input.event) && input.request_id) this.#settle(id, input.request_id, { decision: "neutral" }, true);
       return { decision: "neutral" };
     }
     this.registry.setPending(id, pending);
     const session = this.registry.get(id);
-    if (session) this.registry.upsert({ ...session, metadata: { ...object(session.metadata), hook_pending: { id: pending.id, turn_id: string(input.payload.turn_id), ...(input.request_id_kind === "native" ? { tool_use_id: pending.id } : {}) } } as JsonValue }, { authority: 40 });
+    if (session) this.registry.upsert({ ...session, metadata: { ...object(session.metadata), hook_pending: { id: pending.id, turn_id: string(input.payload.turn_id), ...(input.request_id_kind === "native" ? { tool_use_id: pending.id } : {}) } } as JsonValue }, { authority: harnessMode === "actionable" ? 80 : 40 });
     this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
     if (pending.type === "approval") this.registry.append(id, "permission_request", { approval_id: pending.id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary }, idempotency);
-    if (mode !== "actionable") return { decision: "neutral" };
+    if (mode !== "actionable" || claudeQuestionObservation) return { decision: "neutral" };
     this.#targets.add(id);
     return new Promise<HookBridgeResult>((resolve) => {
       const key = waiterKey(id, pending.id); const replaced = this.#waiters.get(key);
       if (replaced) { clearTimeout(replaced.timer); replaced.resolve({ decision: "neutral" }); }
       const waiter = { session_id: id, pending_id: pending.id, resolve, timer: undefined as unknown as NodeJS.Timeout };
-      waiter.timer = setTimeout(() => { if (this.#waiters.get(key) === waiter) this.#settle(id, pending.id, { decision: "neutral" }, true); }, this.wait_ms);
+      const waitMs = claudeQuestionPermission ? Math.min(this.wait_ms, DEFAULT_CLAUDE_QUESTION_WAIT_MS) : this.wait_ms;
+      waiter.timer = setTimeout(() => {
+        if (this.#waiters.get(key) !== waiter) return;
+        if (claudeQuestionPermission && pending.type === "question") {
+          this.registry.setPending(id, { ...pending, read_only: true });
+          this.registry.setStatus(id, "waiting_input");
+          this.#settle(id, pending.id, { decision: "neutral" }, false);
+        } else this.#settle(id, pending.id, { decision: "neutral" }, true);
+      }, waitMs);
       this.#waiters.set(key, waiter);
     });
   }
@@ -242,7 +252,7 @@ export class HookIngestor {
     if (![...this.#waiters.values()].some((waiter) => waiter.session_id === sessionId)) this.#targets.delete(sessionId);
   }
 
-  #pending(input: NativeHookEnvelope, ts: string): PendingInteraction | undefined {
+  #pending(input: NativeHookEnvelope, ts: string, readOnlyQuestion = false): PendingInteraction | undefined {
     const requestId = input.request_id ?? string(input.payload.request_id) ?? string(input.payload.permission_request_id) ?? string(input.payload.tool_use_id) ?? string(input.payload.tool_call_id);
     if (!requestId) return undefined;
     if (input.event === "PermissionRequest" || input.event === "permission.asked") return { type: "approval", id: requestId, session_id: input.session_id,
@@ -256,7 +266,7 @@ export class HookIngestor {
         ...(typeof question.multiSelect === "boolean" ? { multiple: question.multiSelect } : typeof question.multiple === "boolean" ? { multiple: question.multiple } : {}), custom: true }));
       return { type: "question", id: requestId, session_id: input.session_id, prompt: normalized.map((item) => item.prompt).join("\n") || string(input.payload.prompt) || "Question",
         options: normalized.flatMap((item) => item.options.map((option) => option.label)), questions: normalized, tool_call_id: string(input.payload.tool_use_id), requested_at: ts,
-        read_only: eventMode(input) !== "actionable" };
+        read_only: eventMode(input) !== "actionable" || readOnlyQuestion };
     }
     return undefined;
   }
