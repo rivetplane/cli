@@ -8,6 +8,8 @@ import { SessionRegistry } from "./registry.js";
 export interface CommandTarget { sendMessage(text: string): Promise<void>; respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void | Promise<void>; interrupt(): void | Promise<void> }
 interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[] }
 
+const REPLAY_LIMIT_PER_SESSION = 500;
+
 function relayUrl(server: string): string {
   const url = new URL(server); url.protocol = url.protocol === "https:" ? "wss:" : "ws:"; url.pathname = `${url.pathname.replace(/\/$/, "")}/v1/relay`; return url.toString();
 }
@@ -50,16 +52,27 @@ export class OutboundRelay extends EventEmitter {
       const now = new Date().toISOString();
       const machine: Machine = { id: this.credentials.machine_id, name: this.credentials.machine_name, owner_account_id: this.credentials.owner_account_id, last_seen_at: now, status: "online" };
       socket.send(JSON.stringify({ type: "machine.hello", protocol_version: 1, machine } satisfies ClientToServerMessage));
-      for (const session of this.registry.list()) {
+      const sessions = this.registry.list();
+      for (const session of sessions) {
         socket.send(JSON.stringify({ type: "session.upsert", session: this.#namespace(session) } satisfies ClientToServerMessage));
-        // Replay the local transcript after reconnect. The server deduplicates
-        // by event id and sequence, so this also repairs an interrupted sync.
-        for (const event of this.registry.transcript(session.id, 0, Number.MAX_SAFE_INTEGER)) {
-          socket.send(JSON.stringify({ type: "transcript.append", event: { ...event, session_id: this.#externalId(session) } } satisfies ClientToServerMessage));
-        }
       }
       for (const capabilities of this.options.capabilities?.() ?? []) socket.send(JSON.stringify({ type: "harness.capabilities", capabilities } satisfies ClientToServerMessage));
+      // Deliver live state that accumulated during reconnect before historical
+      // transcript repair. This keeps new pending requests actionable.
       for (const message of this.#queue.splice(0)) socket.send(JSON.stringify(message));
+      // Replay a bounded, round-robin tail. The server deduplicates event IDs.
+      // A large backlog from one harness cannot delay all other sessions.
+      const replays = sessions.map((session) => ({ session, events: this.registry.transcriptTail(session.id, REPLAY_LIMIT_PER_SESSION), offset: 0 }));
+      let pending = true;
+      while (pending) {
+        pending = false;
+        for (const replay of replays) {
+          const event = replay.events[replay.offset++];
+          if (!event) continue;
+          pending = true;
+          socket.send(JSON.stringify({ type: "transcript.append", event: { ...event, session_id: this.#externalId(replay.session) } } satisfies ClientToServerMessage));
+        }
+      }
       this.#heartbeat = setInterval(() => { this.send({ type: "machine.heartbeat", machine_id: machine.id, sent_at: new Date().toISOString() });
         for (const capabilities of this.options.capabilities?.() ?? []) this.send({ type: "harness.capabilities", capabilities }); }, 15_000);
       this.#heartbeat.unref(); this.emit("online");
