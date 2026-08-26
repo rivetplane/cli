@@ -57,4 +57,3 @@ The implementation was checked against these public interfaces:
 - [Rovo Dev CLI](https://developer.atlassian.com/cloud/acli/reference/commands/rovodev/)
 
 No action support is claimed for a harness that does not publish an exact-ID response interface.
-

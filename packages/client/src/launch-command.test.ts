@@ -10,4 +10,3 @@ test("redacts structured secrets from logs", () => {
   const value = redactLogValue({ authorization: "Bearer abc123", api_key: "sk-test", safe: "yes" });
   assert.equal(value.includes("abc123"), false); assert.equal(value.includes("sk-test"), false); assert.equal(value.includes("yes"), true);
 });
-
