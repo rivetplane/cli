@@ -20,9 +20,9 @@ test("authenticates outbound relay, sends state, and applies inbound commands", 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
   const registry = new SessionRegistry(); registry.upsert({ id: "s1", machine_id: "m1", harness_type: "test", cwd: "/tmp", status: "waiting_input", created_at: "2026-01-01T00:00:00Z", last_activity_at: "2026-01-01T00:00:00Z", pending: null });
   registry.append("s1", "agent_message", { text: "existing transcript" });
-  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => ({ sendMessage: async (text) => { sentText = text; }, respondToPending: () => {}, interrupt: () => {} }));
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => ({ sendMessage: async (text) => { sentText = text; }, respondToPending: () => {}, interrupt: () => {} }), { replay_delay_ms: 0, replay_interval_ms: 0 });
   try {
-    relay.start(); await until(() => received.some((message) => message.type === "command.result"));
+    relay.start(); await until(() => received.some((message) => message.type === "command.result") && received.some((message) => message.type === "transcript.append"));
     assert.equal(authorization, "Bearer secret"); assert.equal(received[0]?.type, "machine.hello"); assert.equal(sentText, "go");
     assert.equal(received.some((message) => message.type === "session.upsert"), true);
     assert.equal((received.find((message) => message.type === "session.upsert")?.session as { id: string }).id, "m1/test/s1");
@@ -55,6 +55,7 @@ test("sends recent snapshots and capabilities before bounded round-robin replay"
   }
   const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined, {
     capabilities: () => [{ machine_id: "m1", harness_type: "opencode", can_create_session: false, directories: ["/tmp"], models: [], reported_at: new Date().toISOString() }],
+    replay_delay_ms: 0, replay_interval_ms: 0,
   });
   try {
     relay.start(); await until(() => received.filter((message) => message.type === "transcript.append").length === 40);
@@ -78,7 +79,7 @@ test("caps reconnect snapshots and sends pending sessions first", async () => {
   }
   const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined);
   try {
-    relay.start(); await until(() => received.filter((message) => message.type === "session.upsert").length === 32);
+    relay.start(); await until(() => received.filter((message) => message.type === "session.upsert").length === 16);
     const snapshots = received.filter((message) => message.type === "session.upsert");
     assert.equal((snapshots[0]?.session as { id: string }).id, "m1/test/s0");
     assert.equal(snapshots.some((message) => (message.session as { id: string }).id === "m1/test/s299"), true);

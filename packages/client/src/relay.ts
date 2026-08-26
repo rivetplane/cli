@@ -6,11 +6,13 @@ import type { Credentials } from "./credentials.js";
 import { SessionRegistry } from "./registry.js";
 
 export interface CommandTarget { sendMessage(text: string): Promise<void>; respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void | Promise<void>; interrupt(): void | Promise<void> }
-interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[] }
+interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[]; replay_delay_ms?: number; replay_interval_ms?: number }
 
-const SNAPSHOT_SESSION_LIMIT = 32;
+const SNAPSHOT_SESSION_LIMIT = 16;
 const REPLAY_LIMIT_PER_SESSION = 20;
 const REPLAY_EVENT_LIMIT = 200;
+const REPLAY_DELAY_MS = 5_000;
+const REPLAY_INTERVAL_MS = 50;
 
 function snapshotSessions(registry: SessionRegistry): Session[] {
   return registry.list().sort((left, right) => {
@@ -27,6 +29,7 @@ export class OutboundRelay extends EventEmitter {
   #socket: WebSocket | undefined;
   #retry: NodeJS.Timeout | undefined;
   #heartbeat: NodeJS.Timeout | undefined;
+  #replay: NodeJS.Timeout | undefined;
   #stopped = true;
   #attempt = 0;
   #queue: ClientToServerMessage[] = [];
@@ -46,7 +49,7 @@ export class OutboundRelay extends EventEmitter {
   }
 
   start(): void { if (!this.#stopped) return; this.#stopped = false; this.#connect(); }
-  stop(): void { this.#stopped = true; if (this.#retry) clearTimeout(this.#retry); if (this.#heartbeat) clearInterval(this.#heartbeat); this.#socket?.close(); }
+  stop(): void { this.#stopped = true; if (this.#retry) clearTimeout(this.#retry); if (this.#heartbeat) clearInterval(this.#heartbeat); if (this.#replay) clearTimeout(this.#replay); this.#socket?.close(); }
   send(message: ClientToServerMessage): void {
     if (this.#socket?.readyState === WebSocket.OPEN) this.#socket.send(JSON.stringify(message));
     else { this.#queue.push(message); if (this.#queue.length > 10_000) this.#queue.shift(); }
@@ -69,20 +72,9 @@ export class OutboundRelay extends EventEmitter {
       // Deliver live state that accumulated during reconnect before historical
       // transcript repair. This keeps new pending requests actionable.
       for (const message of this.#queue.splice(0)) socket.send(JSON.stringify(message));
-      // Replay a bounded, round-robin tail. The server deduplicates event IDs.
-      // A large backlog from one harness cannot delay all other sessions.
-      const replays = sessions.map((session) => ({ session, events: this.registry.transcriptTail(session.id, REPLAY_LIMIT_PER_SESSION), offset: 0 }));
-      let pending = true; let sent = 0;
-      while (pending && sent < REPLAY_EVENT_LIMIT) {
-        pending = false;
-        for (const replay of replays) {
-          const event = replay.events[replay.offset++];
-          if (!event) continue;
-          pending = true;
-          socket.send(JSON.stringify({ type: "transcript.append", event: { ...event, session_id: this.#externalId(replay.session) } } satisfies ClientToServerMessage));
-          if (++sent >= REPLAY_EVENT_LIMIT) break;
-        }
-      }
+      // Repair transcript history after live state has had time to settle. One
+      // frame per tick keeps new approvals and questions ahead of old events.
+      this.#scheduleReplay(socket, sessions);
       this.#heartbeat = setInterval(() => { this.send({ type: "machine.heartbeat", machine_id: machine.id, sent_at: new Date().toISOString() });
         for (const capabilities of this.options.capabilities?.() ?? []) this.send({ type: "harness.capabilities", capabilities }); }, 15_000);
       this.#heartbeat.unref(); this.emit("online");
@@ -90,9 +82,26 @@ export class OutboundRelay extends EventEmitter {
     socket.on("message", (data) => void this.#command(data.toString()));
     socket.on("error", (error) => this.emit("warning", error));
     socket.on("close", () => {
-      if (this.#heartbeat) clearInterval(this.#heartbeat); this.#heartbeat = undefined; this.#socket = undefined; this.emit("offline");
+      if (this.#heartbeat) clearInterval(this.#heartbeat); if (this.#replay) clearTimeout(this.#replay); this.#heartbeat = undefined; this.#replay = undefined; this.#socket = undefined; this.emit("offline");
       if (!this.#stopped) { const delay = Math.min(30_000, 500 * 2 ** this.#attempt++); this.#retry = setTimeout(() => this.#connect(), delay); this.#retry.unref(); }
     });
+  }
+
+  #scheduleReplay(socket: WebSocket, sessions: Session[]): void {
+    const replays = sessions.map((session) => ({ session, events: this.registry.transcriptTail(session.id, REPLAY_LIMIT_PER_SESSION), offset: 0 }));
+    let cursor = 0; let sent = 0;
+    const next = (): void => {
+      if (this.#stopped || socket !== this.#socket || socket.readyState !== WebSocket.OPEN || sent >= REPLAY_EVENT_LIMIT) { this.#replay = undefined; return; }
+      let event: ReturnType<SessionRegistry["transcriptTail"]>[number] | undefined; let session: Session | undefined;
+      for (let checked = 0; checked < replays.length; checked++) {
+        const replay = replays[cursor++ % replays.length]!; const candidate = replay.events[replay.offset++];
+        if (candidate) { event = candidate; session = replay.session; break; }
+      }
+      if (!event || !session) { this.#replay = undefined; return; }
+      socket.send(JSON.stringify({ type: "transcript.append", event: { ...event, session_id: this.#externalId(session) } } satisfies ClientToServerMessage)); sent++;
+      this.#replay = setTimeout(next, this.options.replay_interval_ms ?? REPLAY_INTERVAL_MS); this.#replay.unref();
+    };
+    this.#replay = setTimeout(next, this.options.replay_delay_ms ?? REPLAY_DELAY_MS); this.#replay.unref();
   }
 
   async #command(raw: string): Promise<void> {
