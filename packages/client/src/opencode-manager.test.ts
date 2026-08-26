@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { OpenCodeManager } from "./opencode-manager.js";
 import { SessionRegistry } from "./registry.js";
+import { preferCapabilities } from "./client.js";
 
 test("controls OpenCode sessions through the native SDK", async () => {
   let pending: "approval" | "approval_v2" | "question" | "question_v2" | "none" = "approval";
@@ -95,6 +96,13 @@ test("controls OpenCode sessions through the native SDK", async () => {
 });
 
 async function until(check: () => boolean, timeout = 2_000): Promise<void> { const end = Date.now() + timeout; while (!check()) { if (Date.now() > end) throw new Error("Timed out"); await new Promise((resolve) => setTimeout(resolve, 10)); } }
+
+test("keeps a live capability report ahead of stale discovery state", () => {
+  const base = { machine_id: "m1", harness_type: "opencode", can_create_session: false, directories: ["/repo"], models: [], reported_at: new Date().toISOString() };
+  const live = { ...base, can_create_session: true, transport: "opencode-http-sse", session_capabilities: { discovery: { supported: true, mode: "read_write" as const }, transcript: { supported: true, mode: "read_write" as const }, messaging: { supported: true, mode: "read_write" as const }, question_response: { supported: true, mode: "read_write" as const }, approval_response: { supported: true, mode: "read_write" as const } } };
+  const stale = { ...base, transport: "opencode-cli-export", session_capabilities: { discovery: { supported: true, mode: "read_only" as const }, transcript: { supported: true, mode: "read_only" as const }, messaging: { supported: false, mode: "unsupported" as const }, question_response: { supported: false, mode: "unsupported" as const }, approval_response: { supported: false, mode: "unsupported" as const } } };
+  assert.equal(preferCapabilities([live, stale])[0]?.transport, "opencode-http-sse"); assert.equal(preferCapabilities([live, stale]).length, 1);
+});
 
 test("starts and stops a loopback OpenCode server on an available port", async () => {
   const server = createServer((request, response) => {

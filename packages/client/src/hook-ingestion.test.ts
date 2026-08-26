@@ -65,3 +65,12 @@ test("records only the Campfire host role", async () => {
   await hooks.ingest({ ...base, harness: "campfire", event: "session_start", session_id: "host", payload: { role: "host" } });
   assert.deepEqual(registry.get("host")?.metadata, { transport: "claude-hook", hook_event: "session_start", hook_mode: "lifecycle", role: "host" });
 });
+
+test("reports action capabilities only for exact-ID hook transports", async () => {
+  const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 5);
+  await hooks.ingest({ ...base, harness: "codex", event: "PreToolUse", payload: { tool_name: "shell" } });
+  const approval = hooks.ingest({ ...base, event: "PermissionRequest", request_id: "capability-request", payload: { tool_name: "Bash" } });
+  await new Promise((resolve) => setImmediate(resolve)); hooks.respond("full-session-id", "capability-request", "deny"); await approval;
+  assert.equal(hooks.capabilities().find((item) => item.harness_type === "codex")?.session_capabilities?.approval_response.supported, false);
+  assert.equal(hooks.capabilities().find((item) => item.harness_type === "claude-code")?.session_capabilities?.approval_response.supported, true);
+});

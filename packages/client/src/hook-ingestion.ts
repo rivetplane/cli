@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { JsonValue, PendingInteraction, SessionStatus } from "@rivetplane/shared/model";
+import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 
@@ -71,15 +72,33 @@ export class HookIngestor {
   #waiters = new Map<string, Waiter>();
   #targets = new Set<string>();
   #cursors = new Map<string, number>();
+  #harnesses = new Map<string, { cwd: string; transport: string; mode: HookActionMode }>();
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly wait_ms = DEFAULT_HOOK_WAIT_MS) {}
 
   target(id: string): CommandTarget | undefined { return this.#targets.has(id) ? new HookTarget(this, id) : undefined; }
+  capabilities(): HarnessCapabilities[] {
+    return [...this.#harnesses].map(([harness, state]) => {
+      const actionable = state.mode === "actionable"; const telemetry = state.mode !== "lifecycle";
+      const actionReason = actionable ? undefined : "This native hook has no verified exact-ID response interface";
+      const unsupported = { supported: false, mode: "unsupported" as const, ...(actionReason ? { reason: actionReason } : {}) };
+      return { machine_id: this.machine_id, harness_type: harness, can_create_session: false, directories: [state.cwd], models: [], reported_at: new Date().toISOString(), transport: state.transport,
+        session_capabilities: {
+          discovery: { supported: true, mode: "read_only" }, transcript: telemetry ? { supported: true, mode: "read_only" } : { supported: false, mode: "unsupported", reason: "Lifecycle events do not include a transcript" },
+          live_attachment: { supported: true, mode: "read_only" }, messaging: unsupported, interrupt: unsupported,
+          question_response: actionable && (harness === "claude-code" || harness === "opencode") ? { supported: true, mode: "read_write" } : unsupported,
+          approval_response: actionable && (harness === "claude-code" || harness === "opencode") ? { supported: true, mode: "read_write" } : unsupported,
+        } };
+    });
+  }
 
   async ingest(raw: unknown): Promise<HookBridgeResult> {
     let input = validateHookEnvelope(raw);
     if (input.harness === "campfire" && string(input.payload.role) && string(input.payload.role) !== "host") return { decision: "neutral" };
     if (input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion") input = { ...input, event: "AskUserQuestion" };
     const id = input.session_id; const ts = timestamp(input.timestamp); const mode = eventMode(input);
+    const priorHarness = this.#harnesses.get(input.harness); const rank = (value: HookActionMode): number => value === "actionable" ? 3 : value === "telemetry" ? 2 : 1;
+    if (!priorHarness || rank(mode) >= rank(priorHarness.mode)) this.#harnesses.set(input.harness, { cwd: input.cwd, transport: input.transport, mode });
+    const harnessMode = this.#harnesses.get(input.harness)?.mode ?? mode;
     const cursorKey = `${input.harness}/${id}/${input.transport}`;
     if (typeof input.cursor === "number") {
       const prior = this.#cursors.get(cursorKey);
@@ -92,9 +111,9 @@ export class HookIngestor {
       id, machine_id: this.machine_id, harness_type: input.harness, cwd: input.cwd, status,
       created_at: prior?.created_at ?? ts, last_activity_at: ts, pending: prior?.pending ?? null,
       ...(input.model ? { model: parseModel(input.model) } : prior?.model ? { model: prior.model } : {}),
-      ...(input.agent ? { agent: input.agent } : prior?.agent ? { agent: prior.agent } : {}), read_only: mode !== "actionable",
-      metadata: { transport: input.transport, hook_event: input.event, hook_mode: mode, ...(input.harness === "campfire" ? { role: "host" } : {}) } as JsonValue,
-    }, { authority: mode === "actionable" ? 80 : 40 });
+      ...(input.agent ? { agent: input.agent } : prior?.agent ? { agent: prior.agent } : {}), read_only: harnessMode !== "actionable",
+      metadata: { transport: input.transport, hook_event: input.event, hook_mode: harnessMode, ...(input.harness === "campfire" ? { role: "host" } : {}) } as JsonValue,
+    }, { authority: harnessMode === "actionable" ? 80 : 40 });
 
     const idempotency = { id: eventId(input), ts };
     if (isToolStart(input.event)) this.registry.append(id, "tool_call", {

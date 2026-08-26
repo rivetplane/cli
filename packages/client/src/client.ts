@@ -10,6 +10,7 @@ import { CodexRolloutDiscovery } from "./codex-rollout-discovery.js";
 import { CodexAppServerManager } from "./codex-app-server.js";
 import { ClaudeCodeDiscovery } from "./claude-code-discovery.js";
 import { HookIngestor } from "./hook-ingestion.js";
+import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 
 export interface ClientOptions {
   credentials?: Credentials;
@@ -87,13 +88,19 @@ export class HarnessControlClient {
         if (command.harness_type === "codex" && this.codex_app_server) return this.codex_app_server.createSession(command);
         throw new Error("Harness cannot create sessions");
       },
-      capabilities: () => [this.opencode?.capabilities() ?? this.opencode_exports?.capabilities(), this.codex_app_server?.capabilities() ?? this.codex_rollouts?.capabilities(), this.claude_code?.capabilities()].filter((value): value is NonNullable<typeof value> => Boolean(value)),
+      capabilities: () => this.capabilityReports(),
     });
     this.manager.registry.on("warning", (error) => this.manager.registry.emit("log", `Warning: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   async start(): Promise<{ local_port: number }> { const local_port = await this.local_api.start(); await Promise.all([this.manager.start(), this.opencode?.start(), this.opencode_exports?.start(), this.claude_code?.start(), this.codex_rollouts?.start(), this.codex_app_server?.start()]); this.relay?.start(); return { local_port }; }
   async stop(): Promise<void> { this.relay?.stop(); this.opencode?.stop(); this.opencode_exports?.stop(); this.claude_code?.stop(); this.codex_rollouts?.stop(); await this.codex_app_server?.stop(); this.manager.stop(); await this.local_api.stop(); }
+  capabilityReports(): HarnessCapabilities[] {
+    return preferCapabilities([
+      this.opencode?.capabilities(), this.codex_app_server?.capabilities(), ...this.hooks.capabilities(),
+      this.opencode_exports?.capabilities(), this.codex_rollouts?.capabilities(), this.claude_code?.capabilities(),
+    ].filter((value): value is HarnessCapabilities => Boolean(value)));
+  }
   harnesses() {
     const result = new Map<string, ReturnType<SessionManager["harnesses"]>[number]>();
     for (const item of [...this.manager.harnesses(), ...(this.opencode?.harnesses() ?? []), ...(this.opencode_exports?.harnesses() ?? []), ...(this.claude_code?.harnesses() ?? []), ...(this.codex_rollouts?.harnesses() ?? []), ...(this.codex_app_server?.harnesses() ?? [])]) {
@@ -101,6 +108,12 @@ export class HarnessControlClient {
     }
     return [...result.values()];
   }
+}
+
+export function preferCapabilities(reports: HarnessCapabilities[]): HarnessCapabilities[] {
+  const selected = new Map<string, HarnessCapabilities>();
+  for (const report of reports) if (!selected.has(report.harness_type)) selected.set(report.harness_type, report);
+  return [...selected.values()].map((report) => structuredClone(report));
 }
 
 export function localCredentials(server_url: string): Credentials {
