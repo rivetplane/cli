@@ -77,7 +77,23 @@ test("keeps a timed-out Claude question visible as local-only pending state", as
   const pending = registry.get(envelope.session_id)?.pending;
   assert.equal(pending?.type, "question");
   assert.equal(pending?.read_only, true);
+  assert.ok(pending?.expires_at);
+  assert.equal(registry.get(envelope.session_id)?.read_only, true);
   assert.equal(registry.get(envelope.session_id)?.status, "waiting_input");
+  assert.equal(hooks.target(envelope.session_id), undefined);
+});
+
+test("makes a timed-out Claude approval and its session read-only", async () => {
+  const payload = await fixture<Record<string, unknown>>("claude-code", "permission-request.json");
+  const envelope = toHookEnvelope("claude-code", "PermissionRequest", payload);
+  const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 20);
+  assert.deepEqual(await hooks.ingest(envelope), { decision: "neutral" });
+  const session = registry.get(envelope.session_id);
+  assert.equal(session?.pending?.type, "approval");
+  assert.equal(session?.pending?.read_only, true);
+  assert.ok(session?.pending?.expires_at);
+  assert.equal(session?.read_only, true);
+  assert.equal(session?.status, "waiting_approval");
   assert.equal(hooks.target(envelope.session_id), undefined);
 });
 

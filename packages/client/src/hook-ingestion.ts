@@ -7,11 +7,11 @@ import { SessionRegistry } from "./registry.js";
 
 export const HOOK_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_HOOK_WAIT_MS = 30 * 60_000;
-// Claude's PermissionRequest hook is the only documented point where an
-// AskUserQuestion input can be replaced safely. Keep that waiter alive long
-// enough for the relay and a remote human response, while still returning
-// neutral before Claude's 125-second command-hook deadline so local fallback
-// remains fail-open.
+// Claude's PermissionRequest hook is the only documented point where a native
+// approval or AskUserQuestion response can be returned safely. Keep the waiter
+// alive long enough for a remote human response, while still returning neutral
+// before Claude's 125-second command-hook deadline so local fallback remains
+// fail-open.
 export const DEFAULT_CLAUDE_QUESTION_WAIT_MS = 110_000;
 export const DEFAULT_NATIVE_CONFIRMATION_WAIT_MS = 10_000;
 
@@ -167,6 +167,7 @@ export class HookIngestor {
     let input = validateHookEnvelope(raw);
     if (input.harness === "codex" && input.event === "PermissionRequest" && !input.request_id) input = withCodexTelemetryIdentity(input);
     validateVerifiedPayload(input);
+    const claudePermission = input.harness === "claude-code" && input.event === "PermissionRequest";
     const claudeQuestionPermission = isClaudeQuestionPermission(input);
     const claudeQuestionObservation = input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion";
     if (claudeQuestionPermission || claudeQuestionObservation) input = { ...input, event: "AskUserQuestion" };
@@ -207,7 +208,11 @@ export class HookIngestor {
       output: safeJson(input.payload.tool_response ?? input.payload.tool_output ?? input.payload.output), is_error: /failure|error/i.test(input.event) || Boolean(input.payload.error),
     }, idempotency);
 
-    const pending = this.#pending(input, ts, claudeQuestionObservation);
+    const waitMs = claudePermission ? Math.min(this.wait_ms, DEFAULT_CLAUDE_QUESTION_WAIT_MS) : this.wait_ms;
+    const rawPending = this.#pending(input, ts, claudeQuestionObservation);
+    const pending = rawPending && claudePermission
+      ? { ...rawPending, expires_at: new Date(Date.now() + waitMs).toISOString() }
+      : rawPending;
     if (!pending) {
       if (isResolution(input.event) && input.request_id) this.#confirm(id, input.request_id);
       return { decision: "neutral" };
@@ -223,12 +228,17 @@ export class HookIngestor {
       const key = waiterKey(id, pending.id); const replaced = this.#waiters.get(key);
       if (replaced) { clearTimeout(replaced.timer); replaced.resolve({ decision: "neutral" }); }
       const waiter = { session_id: id, pending_id: pending.id, resolve, timer: undefined as unknown as NodeJS.Timeout };
-      const waitMs = claudeQuestionPermission ? Math.min(this.wait_ms, DEFAULT_CLAUDE_QUESTION_WAIT_MS) : this.wait_ms;
       waiter.timer = setTimeout(() => {
         if (this.#waiters.get(key) !== waiter) return;
-        if (claudeQuestionPermission && pending.type === "question") {
-          this.registry.setPending(id, { ...pending, read_only: true });
-          this.registry.setStatus(id, "waiting_input");
+        if (claudePermission) {
+          const current = this.registry.get(id);
+          if (current?.pending?.id === pending.id) this.registry.upsert({
+            ...current,
+            read_only: true,
+            pending: { ...current.pending, read_only: true },
+            metadata: { ...object(current.metadata), hook_response_expired_at: new Date().toISOString() } as JsonValue,
+          }, { authority: 80 });
+          this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
           this.#settle(id, pending.id, { decision: "neutral" }, false);
         } else this.#settle(id, pending.id, { decision: "neutral" }, true);
       }, waitMs);

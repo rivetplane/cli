@@ -51,6 +51,8 @@ export interface Approval {
   resolved_at?: Timestamp;
   resolution?: ApprovalResolution;
   read_only?: boolean;
+  /** Last instant at which the native harness can accept a remote response. */
+  expires_at?: Timestamp;
 }
 
 export interface Question {
@@ -72,6 +74,8 @@ export interface Question {
   tool_call_id?: string;
   /** True when this adapter can observe, but cannot answer, the request. */
   read_only?: boolean;
+  /** Last instant at which the native harness can accept a remote response. */
+  expires_at?: Timestamp;
   requested_at: Timestamp;
   resolved_at?: Timestamp;
   response?: string;
