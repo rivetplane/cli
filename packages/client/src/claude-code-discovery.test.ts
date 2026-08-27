@@ -67,6 +67,20 @@ test("does not clear a question supplied by the live Claude hook", async () => {
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });
 
+test("does not replace an actionable hook question with its read-only transcript copy", async () => {
+  const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
+  const requestedAt = "2026-08-25T15:41:40.000Z";
+  const pending = { type: "question" as const, id: "rivetplane-hook-question", session_id: sessionId, prompt: "Which test color should I use?", options: ["Blue", "Green"], requested_at: requestedAt, source: "claude-code-hook-command", response_mode: "remote" as const, read_only: false };
+  try {
+    const registry = new SessionRegistry();
+    registry.upsert({ id: sessionId, machine_id: "machine-1", harness_type: "claude-code", cwd: "/private/tmp/claude-project", status: "waiting_input", created_at: requestedAt, last_activity_at: requestedAt, pending, metadata: { hook_pending: { id: pending.id } } }, { authority: 80 });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "hook-collision.json"), runner: runner(() => agents) });
+    await manager.poll();
+    assert.deepEqual(registry.get(sessionId)?.pending, pending);
+    manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
 test("accepts only an explicit exact-ID approval state and handles transcript truncation", async () => {
   const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json")); agents[0] = { ...agents[0]!, waitingFor: "permission prompt" };
   await writeFile(env.state, JSON.stringify({ sessionId, updatedAt: "2026-08-25T15:41:40.233Z", block: { permission: { id: "perm_exact_1", toolName: "Bash", input: { command: "touch proof" }, requestedAt: "2026-08-25T15:41:40.000Z" } } }));

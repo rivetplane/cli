@@ -263,7 +263,10 @@ export class ClaudeCodeDiscovery {
     const currentSession = this.registry.get(agent.sessionId); const currentPending = currentSession?.pending ?? null;
     const hookMarker = object(object(currentSession?.metadata)?.hook_pending);
     const hookPending = currentPending && string(hookMarker?.id) === currentPending.id ? currentPending : null;
-    const nextPending = pending ?? hookPending;
+    // The live hook owns Claude's response callback. Transcript/state discovery
+    // can observe the same question under its native tool-use ID, but that
+    // read-only observation must never replace the actionable hook record.
+    const nextPending = hookPending ?? pending ?? null;
     if (JSON.stringify(currentPending) !== JSON.stringify(nextPending)) this.registry.setPending(agent.sessionId, nextPending);
     this.registry.setStatus(agent.sessionId, statusFromAgent(agent));
     const current = this.registry.get(agent.sessionId); if (current) this.registry.upsert({ ...current, last_activity_at: observedActivity });
