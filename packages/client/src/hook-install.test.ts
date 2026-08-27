@@ -60,7 +60,8 @@ test("refreshes only previously installed hooks with the current Node runtime", 
   await writeFile(claudePath, stale);
   const refreshed = await refreshInstalledHooks({ home, env: {}, executable });
   assert.deepEqual(refreshed.map((item) => item.harness), ["claude-code"]);
-  assert.match(await readFile(claudePath, "utf8"), new RegExp(process.execPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const settings = JSON.parse(await readFile(claudePath, "utf8")) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+  assert.equal(settings.hooks.PermissionRequest?.[0]?.hooks[0]?.command.includes(process.execPath), true);
   await assert.rejects(access(join(home, ".config", "opencode", "plugins", "rivetplane.ts")), /ENOENT/);
 });
 
