@@ -85,14 +85,14 @@ test("waits briefly for the actionable Claude hook before publishing transcript-
   const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
   try {
     const registry = new SessionRegistry();
-    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "grace.json"), runner: runner(() => agents), question_grace_ms: 20 });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "grace.json"), runner: runner(() => agents), question_grace_ms: 1_000 });
     await manager.poll();
     assert.equal(registry.get(sessionId)?.pending, null);
     const requestedAt = new Date().toISOString();
     const hook = { type: "question" as const, id: "rivetplane-live-question", session_id: sessionId, prompt: "Which test color should I use?", options: ["Blue", "Green"], requested_at: requestedAt, source: "claude-code-hook-command", response_mode: "remote" as const, read_only: false };
     const current = registry.get(sessionId)!;
     registry.upsert({ ...current, pending: hook, read_only: false, metadata: { hook_pending: { id: hook.id } } }, { authority: 80 });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     assert.deepEqual(registry.get(sessionId)?.pending, hook);
     manager.stop();
   } finally { await rm(env.root, { recursive: true, force: true }); }
@@ -102,10 +102,10 @@ test("publishes a transcript-only Claude question after the hook grace period", 
   const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
   try {
     const registry = new SessionRegistry();
-    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "grace-fallback.json"), runner: runner(() => agents), question_grace_ms: 20 });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "grace-fallback.json"), runner: runner(() => agents), question_grace_ms: 1_000 });
     await manager.poll();
     assert.equal(registry.get(sessionId)?.pending, null);
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     assert.equal(registry.get(sessionId)?.pending?.id, "toolu_exact_question");
     assert.equal(registry.get(sessionId)?.pending?.read_only, true);
     manager.stop();
