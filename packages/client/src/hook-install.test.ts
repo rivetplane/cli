@@ -125,7 +125,7 @@ test("runs the generated OpenCode plugin with exact owner, payload, and answer a
 });
 
 test("runs installed Claude and OpenCode hooks with no rivetplane binary on PATH", async () => {
-  const home = await mkdtemp(join(tmpdir(), "rivetplane clean home with spaces ")); const xdg = join(home, "config with spaces"); const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: xdg, PATH: "" };
+  const home = await mkdtemp(join(tmpdir(), "rivetplane clean home with spaces ")); const xdg = join(home, "config with spaces"); const env = { ...process.env, HOME: home, CODEX_HOME: join(home, ".codex"), XDG_CONFIG_HOME: xdg, PATH: "" };
   await installHooks({ home, env, executable: async () => true });
   const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-clean", registry, 5); const discovery = defaultHookDiscoveryPath(env, home);
   const api = new LocalApi(registry, { port: 0, hooks, hook_discovery_path: discovery, target: (id) => hooks.target(id) }); await api.start();
