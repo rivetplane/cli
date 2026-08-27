@@ -338,7 +338,7 @@ export class OpenCodeManager {
         if (current?.id !== permission.id) {
           const toolName = permission.api === "v2" ? permission.action : permission.permission || "tool";
           const input = (permission.api === "v2" ? permission.resources : permission.patterns).join(", ");
-          this.registry.setPending(id, { type: "approval", id: permission.id, session_id: id, tool_name: toolName, tool_input_summary: input, requested_at: new Date().toISOString() });
+          this.registry.setPending(id, { type: "approval", id: permission.id, session_id: id, tool_name: toolName, tool_input_summary: input, source: "opencode-sdk", response_mode: "remote", requested_at: new Date().toISOString() });
           this.registry.append(id, "permission_request", { approval_id: permission.id, tool_name: toolName, tool_input_summary: input });
         }
         this.registry.setStatus(id, "waiting_approval");
@@ -346,7 +346,7 @@ export class OpenCodeManager {
         if (current?.id !== question.id) this.registry.setPending(id, {
           type: "question", id: question.id, session_id: id,
           prompt: question.questions.map((item) => `${item.header}: ${item.question}`).join("\n"),
-          options: question.questions.flatMap((item) => item.options.map((option) => option.label)), requested_at: new Date().toISOString(),
+          options: question.questions.flatMap((item) => item.options.map((option) => option.label)), source: "opencode-sdk", response_mode: "remote", requested_at: new Date().toISOString(),
         });
         this.registry.setStatus(id, "waiting_input");
       } else if (current) this.registry.setPending(id, null);

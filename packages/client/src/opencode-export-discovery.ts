@@ -239,7 +239,7 @@ function questionFromPart(sessionId: string, part: RecordValue): Question | unde
   const callID = string(part.callID) ?? string(part.id) ?? stableId(sessionId, "question");
   return { type: "question", id: callID, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), header: questions.map((item) => item.header).join(" / "),
     options: questions.flatMap((item) => item.options.map((option) => option.label)), option_details: questions.flatMap((item) => item.options), questions,
-    tool_call_id: callID, read_only: true, requested_at: timestamp(object(state.time)?.start) };
+    tool_call_id: callID, source: "opencode-export", response_mode: "local", read_only: true, requested_at: timestamp(object(state.time)?.start) };
 }
 
 function approvalFromPart(sessionId: string, part: RecordValue): PendingInteraction | undefined {
@@ -252,7 +252,7 @@ function approvalFromPart(sessionId: string, part: RecordValue): PendingInteract
   const id = string(explicit?.id) ?? string(explicit?.requestID) ?? string(part.callID) ?? string(part.id);
   if (!id) return undefined;
   return { type: "approval", id, session_id: sessionId, tool_name: string(explicit?.permission) ?? string(explicit?.tool) ?? tool,
-    tool_input_summary: summary(input), requested_at: timestamp(object(explicit?.time)?.created ?? object(state.time)?.start), read_only: true };
+    tool_input_summary: summary(input), source: "opencode-export", response_mode: "local", requested_at: timestamp(object(explicit?.time)?.created ?? object(state.time)?.start), read_only: true };
 }
 
 function detectPending(sessionId: string, messages: Array<{ info: RecordValue; parts: RecordValue[] }>): PendingInteraction | undefined {

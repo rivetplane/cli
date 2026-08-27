@@ -63,7 +63,9 @@ function escalatedCustomCall(payload: RecordValue, sessionId: string, ts: string
   if (!input || !callId || !/\bsandbox_permissions\s*:\s*["']require_escalated["']/.test(input)) return undefined;
   const command = sourceField(input, "cmd") ?? string(payload.name) ?? "tool";
   const justification = sourceField(input, "justification");
-  return { type: "approval", id: callId, session_id: sessionId, tool_name: string(payload.name) ?? "tool", tool_input_summary: boundedText(justification ? `${command}\n${justification}` : command, 2_000), requested_at: ts, read_only: true };
+  return { type: "approval", id: callId, session_id: sessionId, tool_name: string(payload.name) ?? "tool", tool_input_summary: boundedText(justification ? `${command}\n${justification}` : command, 2_000),
+    ...(command ? { command: boundedText(command, 2_000) } : {}), ...(justification ? { description: boundedText(justification, 2_000) } : {}),
+    source: "codex-rollout", response_mode: "local", requested_at: ts, read_only: true };
 }
 function codexQuestion(payload: RecordValue, sessionId: string, ts: string): Question | undefined {
   if (payload.name !== "request_user_input") return undefined;
@@ -79,7 +81,7 @@ function codexQuestion(payload: RecordValue, sessionId: string, ts: string): Que
     return [{ prompt, header: string(item?.header) ?? "Question", options, multiple: false, custom: true }];
   });
   if (!questions.length) return undefined;
-  return { type: "question", id: callId, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), options: questions.flatMap((item) => item.options.map((option) => option.label)), questions, tool_call_id: callId, requested_at: ts, read_only: true };
+  return { type: "question", id: callId, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), options: questions.flatMap((item) => item.options.map((option) => option.label)), questions, tool_call_id: callId, source: "codex-rollout", response_mode: "local", requested_at: ts, read_only: true };
 }
 async function mapLimit<T>(values: readonly T[], concurrency: number, operation: (value: T) => Promise<void>): Promise<void> {
   let index = 0;

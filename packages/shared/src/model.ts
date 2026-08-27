@@ -41,12 +41,22 @@ export const APPROVAL_SCOPES = [
 ] as const;
 export type ApprovalScope = (typeof APPROVAL_SCOPES)[number];
 
+/** Whether the source harness has a live handler that can accept a remote reply. */
+export type PendingResponseMode = "remote" | "local";
+
 export interface Approval {
   type: "approval";
   id: string;
   session_id: string;
   tool_name: string;
   tool_input_summary: string;
+  /** Exact command when the source exposes one separately from its description. */
+  command?: string;
+  /** Human-readable explanation supplied by the source harness. */
+  description?: string;
+  /** Transport/source adapter that observed this interaction. */
+  source?: string;
+  response_mode?: PendingResponseMode;
   requested_at: Timestamp;
   resolved_at?: Timestamp;
   resolution?: ApprovalResolution;
@@ -72,6 +82,9 @@ export interface Question {
     custom?: boolean;
   }>;
   tool_call_id?: string;
+  /** Transport/source adapter that observed this interaction. */
+  source?: string;
+  response_mode?: PendingResponseMode;
   /** True when this adapter can observe, but cannot answer, the request. */
   read_only?: boolean;
   /** Last instant at which the native harness can accept a remote response. */

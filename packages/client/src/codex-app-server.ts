@@ -9,6 +9,7 @@ import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CreateSessionCommand } from "@rivetplane/shared/protocol";
 import WebSocket from "ws";
 import type { CommandTarget } from "./relay.js";
+import { normalizeApprovalInput } from "./pending-normalization.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
 
@@ -299,7 +300,10 @@ export class CodexAppServerManager {
     if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
       const threadId = string(params.threadId); if (!threadId || !this.registry.get(threadId)) { this.#send({ id: rpcId, error: { code: -32602, message: "Unknown thread" } }); return; }
       this.#markControlled(threadId);
-      const id = String(rpcId); const pending: PendingInteraction = { type: "approval", id, session_id: threadId, tool_name: method.includes("commandExecution") ? "commandExecution" : "fileChange", tool_input_summary: summary(params.command ?? params.reason ?? params), requested_at: new Date(number(params.startedAtMs) ?? Date.now()).toISOString() };
+      const id = String(rpcId); const details = normalizeApprovalInput({ command: params.command, description: params.reason });
+      const pending: PendingInteraction = { type: "approval", id, session_id: threadId, tool_name: method.includes("commandExecution") ? "commandExecution" : "fileChange", tool_input_summary: details.summary,
+        ...(details.command ? { command: details.command } : {}), ...(details.description ? { description: details.description } : {}),
+        source: "codex-app-server", response_mode: "remote", requested_at: new Date(number(params.startedAtMs) ?? Date.now()).toISOString() };
       this.#pending.set(id, { rpc_id: rpcId, method, params }); this.registry.setPending(threadId, pending); this.registry.append(threadId, "permission_request", { approval_id: id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary }, { id: `codex-request-${requestKey(rpcId)}` }); this.registry.setStatus(threadId, "waiting_approval"); return;
     }
     if (method === "item/tool/requestUserInput") {
@@ -308,7 +312,7 @@ export class CodexAppServerManager {
       const questions = array(params.questions).map(object).filter((item): item is RecordValue => Boolean(item)); const id = String(rpcId);
       const pending: PendingInteraction = { type: "question", id, session_id: threadId, prompt: questions.map((item) => string(item.question) ?? "").join("\n"), header: questions.map((item) => string(item.header) ?? "").join(" / "),
         options: questions.flatMap((item) => questionOptions(item.options).map((option) => option.label)), option_details: questions.flatMap((item) => questionOptions(item.options)),
-        questions: questions.map((item) => ({ prompt: string(item.question) ?? "", header: string(item.header) ?? "", options: questionOptions(item.options), custom: item.isOther === true })), tool_call_id: string(params.itemId), requested_at: new Date().toISOString() };
+        questions: questions.map((item) => ({ prompt: string(item.question) ?? "", header: string(item.header) ?? "", options: questionOptions(item.options), custom: item.isOther === true })), tool_call_id: string(params.itemId), source: "codex-app-server", response_mode: "remote", requested_at: new Date().toISOString() };
       this.#pending.set(id, { rpc_id: rpcId, method, params }); this.registry.setPending(threadId, pending); this.registry.setStatus(threadId, "waiting_input"); return;
     }
     this.#send({ id: rpcId, error: { code: -32601, message: `Unsupported server request: ${method}` } }); this.#diagnostic(method);

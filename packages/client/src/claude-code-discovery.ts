@@ -142,7 +142,7 @@ function questionFromTool(sessionId: string, tool: OpenTool, state: RecordValue 
   if (questions.length === 0 || stateQuestions.length === 0) return undefined;
   const prompts = new Set(stateQuestions.flatMap((value) => string(object(value)?.question) ? [string(object(value)?.question)!] : []));
   if (!questions.every((question) => prompts.has(question.prompt))) return undefined;
-  return { type: "question", id: tool.id, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), header: questions.map((item) => item.header).join(" / "), options: questions.flatMap((item) => item.options.map((option) => option.label)), option_details: questions.flatMap((item) => item.options), questions, tool_call_id: tool.id, read_only: true, requested_at: tool.requested_at };
+  return { type: "question", id: tool.id, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), header: questions.map((item) => item.header).join(" / "), options: questions.flatMap((item) => item.options.map((option) => option.label)), option_details: questions.flatMap((item) => item.options), questions, tool_call_id: tool.id, source: "claude-code-state", response_mode: "local", read_only: true, requested_at: tool.requested_at };
 }
 
 function explicitApproval(sessionId: string, state: RecordValue | undefined): PendingInteraction | undefined {
@@ -150,7 +150,7 @@ function explicitApproval(sessionId: string, state: RecordValue | undefined): Pe
   if (!permission) return undefined;
   const id = string(permission.id ?? permission.requestId ?? permission.requestID ?? permission.toolUseId ?? permission.tool_use_id);
   if (!id) return undefined;
-  return { type: "approval", id, session_id: sessionId, tool_name: string(permission.toolName ?? permission.tool_name ?? permission.tool) ?? "permission", tool_input_summary: summary(permission.input ?? permission.description ?? permission), requested_at: timestamp(permission.requestedAt ?? permission.timestamp ?? state?.updatedAt), read_only: true };
+  return { type: "approval", id, session_id: sessionId, tool_name: string(permission.toolName ?? permission.tool_name ?? permission.tool) ?? "permission", tool_input_summary: summary(permission.input ?? permission.description ?? permission), source: "claude-code-state", response_mode: "local", requested_at: timestamp(permission.requestedAt ?? permission.timestamp ?? state?.updatedAt), read_only: true };
 }
 
 const CAPABILITY_REASON = "Claude Code has no documented local exact-ID reply API for an arbitrary active session; private cc-socks transport is disabled";

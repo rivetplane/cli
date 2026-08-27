@@ -92,6 +92,8 @@ test("makes a timed-out Claude approval and its session read-only", async () => 
   const session = registry.get(envelope.session_id);
   assert.equal(session?.pending?.type, "approval");
   assert.equal(session?.pending?.read_only, true);
+  assert.equal(session?.pending?.response_mode, "local");
+  assert.equal(session?.pending?.source, "claude-code-hook-command");
   assert.ok(session?.pending?.expires_at);
   assert.equal(session?.read_only, true);
   assert.equal(session?.status, "waiting_approval");
@@ -202,6 +204,11 @@ test("records standalone Codex approval telemetry without a native response and 
   assert.deepEqual(await hooks.ingest(envelope), { decision: "neutral" });
   const pending = registry.get(envelope.session_id)?.pending;
   assert.equal(pending?.id, envelope.request_id); assert.equal(pending?.read_only, true); assert.equal(registry.get(envelope.session_id)?.read_only, true);
+  if (pending?.type === "approval") {
+    assert.equal(pending.command, "npm test");
+    assert.equal(pending.response_mode, "local");
+    assert.equal(pending.source, "codex-hook-command");
+  }
   assert.equal(hooks.target(envelope.session_id), undefined); assert.equal(hooks.capabilities()[0]?.session_capabilities?.approval_response.supported, false); assert.equal(hooks.capabilities()[0]?.session_capabilities?.question_response.supported, false);
   assert.deepEqual(hooks.harnesses()[0]?.discovered_session_ids, [envelope.session_id]);
   assert.deepEqual(await hooks.ingest(toHookEnvelope("codex", "PreToolUse", preTool)), { decision: "neutral" });

@@ -4,6 +4,7 @@ import type { JsonValue, PendingInteraction, SessionStatus } from "@rivetplane/s
 import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
+import { normalizeApprovalInput } from "./pending-normalization.js";
 
 export const HOOK_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_HOOK_WAIT_MS = 30 * 60_000;
@@ -236,7 +237,7 @@ export class HookIngestor {
             this.registry.upsert({
               ...current,
               read_only: true,
-              pending: { ...current.pending, read_only: true },
+              pending: { ...current.pending, read_only: true, response_mode: "local" },
               metadata: { ...object(current.metadata), hook_response_expired_at: new Date().toISOString() } as JsonValue,
             }, { authority: 80 });
             this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
@@ -311,8 +312,13 @@ export class HookIngestor {
   #pending(input: NativeHookEnvelope, ts: string, readOnlyQuestion = false): PendingInteraction | undefined {
     const requestId = input.request_id ?? string(input.payload.request_id) ?? string(input.payload.permission_request_id) ?? string(input.payload.tool_use_id) ?? string(input.payload.tool_call_id);
     if (!requestId) return undefined;
-    if (input.event === "PermissionRequest" || input.event === "permission.asked") return { type: "approval", id: requestId, session_id: input.session_id,
-      tool_name: string(input.payload.tool_name) ?? string(input.payload.permission) ?? "tool", tool_input_summary: summary(input.payload.tool_input ?? input.payload.patterns), requested_at: ts, read_only: eventMode(input) !== "actionable" };
+    if (input.event === "PermissionRequest" || input.event === "permission.asked") {
+      const mode = eventMode(input); const details = normalizeApprovalInput(input.payload.tool_input ?? input.payload.patterns);
+      return { type: "approval", id: requestId, session_id: input.session_id,
+        tool_name: string(input.payload.tool_name) ?? string(input.payload.permission) ?? "tool", tool_input_summary: details.summary,
+        ...(details.command ? { command: details.command } : {}), ...(details.description ? { description: details.description } : {}),
+        source: input.transport, response_mode: mode === "actionable" ? "remote" : "local", requested_at: ts, read_only: mode !== "actionable" };
+    }
     if (/^(AskUserQuestion|question\.asked)$/i.test(input.event)) {
       const toolInput = object(input.payload.tool_input);
       const rawQuestions = Array.isArray(input.payload.questions) ? input.payload.questions : Array.isArray(toolInput.questions) ? toolInput.questions : [];
@@ -322,6 +328,7 @@ export class HookIngestor {
         ...(typeof question.multiSelect === "boolean" ? { multiple: question.multiSelect } : typeof question.multiple === "boolean" ? { multiple: question.multiple } : {}), custom: true }));
       return { type: "question", id: requestId, session_id: input.session_id, prompt: normalized.map((item) => item.prompt).join("\n") || string(input.payload.prompt) || "Question",
         options: normalized.flatMap((item) => item.options.map((option) => option.label)), questions: normalized, tool_call_id: string(input.payload.tool_use_id), requested_at: ts,
+        source: input.transport, response_mode: eventMode(input) !== "actionable" || readOnlyQuestion ? "local" : "remote",
         read_only: eventMode(input) !== "actionable" || readOnlyQuestion };
     }
     return undefined;
