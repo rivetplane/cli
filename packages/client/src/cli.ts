@@ -2,8 +2,14 @@
 import { hostname } from "node:os";
 import { createRequire } from "node:module";
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { HarnessControlClient } from "./client.js";
 import { login, readCredentials, resolveServerUrl, writeCredentials } from "./credentials.js";
+import { emitHook } from "./hook-bridge.js";
+import { installHookBridge } from "./hook-bridge-install.js";
+import { claudeHookSettings, installHooks, refreshInstalledHooks, uninstallHooks } from "./hook-install.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -15,7 +21,10 @@ Usage:
   rivetplane --opencode-url URL [client options]
   rivetplane opencode [client options] [-- OPENCODE_ATTACH_OPTIONS]
   rivetplane codex [client options]
+  rivetplane claude [client options] [-- CLAUDE_OPTIONS]
   rivetplane login [--server URL] [--machine-name NAME] [--machine ID --token TOKEN]
+  rivetplane hooks install [--harness NAME]
+  rivetplane hooks uninstall [--harness NAME]
   rivetplane --help
 
 The client scans ~/.acp/sessions/*.json, attaches to ACP sessions, and reads existing
@@ -29,7 +38,9 @@ transcript poll uses the cached index. Claude Code sessions are discovered machi
 with 'claude agents --json'. Their JSONL transcripts and exact-ID pending records are
 read-only because Claude has no documented local exact-ID reply API. Private cc-socks
 are never used. The client does not start OpenCode by default. Use 'rivetplane opencode' for
-the managed server and attached TUI mode. Login uses https://rivetplane.com unless
+the managed server and attached TUI mode. Verified standalone Codex hooks provide
+lifecycle and local approval attention only; they do not provide remote responses or
+request_user_input. Use 'rivetplane codex' for exact app-server control. Login uses https://rivetplane.com unless
 --server or HARNESS_CP_SERVER selects a self-hosted control plane.`;
 
 function flag(name: string): string | undefined { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }
@@ -37,6 +48,16 @@ function flag(name: string): string | undefined { const offset = process.argv.in
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) { process.stdout.write(`${HELP}\n`); return; }
   if (process.argv.includes("--version") || process.argv.includes("-v")) { process.stdout.write(`${version}\n`); return; }
+  if (process.argv[2] === "hook" && process.argv[3] === "emit") {
+    const harness = flag("--harness"); const event = flag("--event"); const owner = flag("--owner");
+    if (!harness || !event || !owner) throw new Error("--owner, --harness, and --event are required");
+    process.stdout.write(`${JSON.stringify(await emitHook(harness, event, { owner }))}\n`); return;
+  }
+  if (process.argv[2] === "hooks" && (process.argv[3] === "install" || process.argv[3] === "uninstall")) {
+    const harness = flag("--harness"); const results = process.argv[3] === "install" ? await installHooks({ ...(harness ? { only: [harness] } : {}) }) : await uninstallHooks({ ...(harness ? { only: [harness] } : {}) });
+    for (const result of results) process.stdout.write(`${result.harness}: ${result.status}${result.path ? ` (${result.path})` : ""}${result.reason ? ` — ${result.reason}` : ""}\n`);
+    return;
+  }
   if (process.argv[2] === "login") {
     const server_url = resolveServerUrl(flag("--server"), process.env.HARNESS_CP_SERVER);
     const machineName = flag("--machine-name");
@@ -52,8 +73,11 @@ async function main(): Promise<void> {
 
   const explicitOpenCode = process.argv[2] === "opencode";
   const explicitCodex = process.argv[2] === "codex";
+  const explicitClaude = process.argv[2] === "claude";
   const attachOpenCode = explicitOpenCode;
   const credentials = await readCredentials();
+  const refreshedHooks = await refreshInstalledHooks();
+  for (const hook of refreshedHooks.filter((item) => item.status === "skipped")) process.stderr.write(`Warning: Could not refresh ${hook.harness} hooks: ${hook.reason ?? "unknown error"}\n`);
   const discoveryDirectory = flag("--discovery-dir");
   const localPort = Number(flag("--local-port") ?? process.env.HARNESS_CP_LOCAL_PORT ?? 41737);
   if (!Number.isInteger(localPort) || localPort < 0 || localPort > 65_535) throw new Error("--local-port must be a valid port");
@@ -69,6 +93,7 @@ async function main(): Promise<void> {
     ...(credentials ? { credentials } : {}),
     ...(discoveryDirectory ? { discovery_directory: discoveryDirectory } : {}),
     local_port: localPort,
+    hook_discovery_path: process.env.RIVETPLANE_HOOK_DISCOVERY,
     relay: !process.argv.includes("--no-relay"),
     opencode_url: process.argv.includes("--no-opencode") ? false : (flag("--opencode-url") ?? process.env.HARNESS_CP_OPENCODE_URL),
     opencode_managed: explicitOpenCode,
@@ -126,6 +151,15 @@ async function main(): Promise<void> {
       await client.stop();
       process.exitCode = exitCode;
     }
+  } else if (explicitClaude) {
+    const separator = process.argv.indexOf("--"); const claudeOptions = separator >= 0 ? process.argv.slice(separator + 1) : [];
+    if (claudeOptions.includes("--settings")) throw new Error("Do not pass --settings to the Rivetplane Claude wrapper");
+    const settingsDirectory = await mkdtemp(join(tmpdir(), "rivetplane-claude-")); const settingsPath = join(settingsDirectory, "settings.json");
+    const hookBridge = await installHookBridge();
+    await writeFile(settingsPath, `${JSON.stringify(claudeHookSettings(hookBridge), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    attachedProcess = spawn(flag("--claude-executable") ?? process.env.HARNESS_CP_CLAUDE_EXECUTABLE ?? "claude", ["--settings", settingsPath, ...claudeOptions], { cwd: process.cwd(), stdio: "inherit", env: { ...process.env } });
+    const exitCode = await new Promise<number>((resolve, reject) => { attachedProcess?.once("error", reject); attachedProcess?.once("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0))); });
+    await client.stop(); await rm(settingsDirectory, { recursive: true, force: true }); process.exitCode = exitCode;
   }
 }
 

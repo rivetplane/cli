@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { Session, TranscriptEventPayloadMap, TranscriptEventType } from "@rivetplane/shared/model";
+import type { Approval, PendingInteraction, Question, Session, TranscriptEventPayloadMap, TranscriptEventType } from "@rivetplane/shared/model";
 import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
@@ -14,6 +14,7 @@ interface Checkpoint { path: string; offset: number; size: number; mtime_ms: num
 interface CheckpointFile { version: 1; sessions: Record<string, Checkpoint> }
 interface RolloutMeta { id: string; cwd: string; created_at: string; cli_version?: string; model_provider?: string }
 interface ParsedEvent { type: TranscriptEventType; payload: TranscriptEventPayloadMap[TranscriptEventType]; id: string; ts: string }
+interface ParsedLine { meta?: RolloutMeta; event?: ParsedEvent; pending?: PendingInteraction; resolved_pending_id?: string; resolved_pending_resolution?: "approve" | "deny" }
 
 export interface CodexRolloutDiscoveryOptions {
   sessions_directory?: string;
@@ -49,8 +50,42 @@ function boundedText(value: unknown, maxBytes: number): string {
   while (Buffer.byteLength(prefix) > maxBytes - 3) prefix = prefix.slice(0, -1);
   return `${prefix}...`;
 }
+function sessionTitle(value: unknown): string | undefined {
+  const title = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return title && !title.startsWith("<") ? title.slice(0, 160) : undefined;
+}
 function contentText(content: unknown[], maxBytes: number): string {
   return boundedText(content.flatMap((part) => { const item = object(part); const value = string(item?.text); return value && (item?.type === "input_text" || item?.type === "output_text" || item?.type === "text") ? [value] : []; }).join(""), maxBytes);
+}
+function sourceField(source: string, field: string): string | undefined {
+  const match = source.match(new RegExp(`\\b${field}\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`));
+  if (!match?.[1]) return undefined;
+  try { const value = JSON.parse(match[1]); return typeof value === "string" ? value : undefined; } catch { return undefined; }
+}
+function escalatedCustomCall(payload: RecordValue, sessionId: string, ts: string): Approval | undefined {
+  const input = string(payload.input); const callId = string(payload.call_id);
+  if (!input || !callId || !/\bsandbox_permissions\s*:\s*["']require_escalated["']/.test(input)) return undefined;
+  const command = sourceField(input, "cmd") ?? string(payload.name) ?? "tool";
+  const justification = sourceField(input, "justification");
+  return { type: "approval", id: callId, session_id: sessionId, tool_name: string(payload.name) ?? "tool", tool_input_summary: boundedText(justification ? `${command}\n${justification}` : command, 2_000),
+    ...(command ? { command: boundedText(command, 2_000) } : {}), ...(justification ? { description: boundedText(justification, 2_000) } : {}),
+    source: "codex-rollout", response_mode: "local", requested_at: ts, read_only: true };
+}
+function codexQuestion(payload: RecordValue, sessionId: string, ts: string): Question | undefined {
+  if (payload.name !== "request_user_input") return undefined;
+  const callId = string(payload.call_id); const source = string(payload.arguments);
+  if (!callId || !source) return undefined;
+  let input: RecordValue | undefined; try { input = object(JSON.parse(source)); } catch { return undefined; }
+  const rawQuestions = Array.isArray(input?.questions) ? input.questions : [];
+  const questions = rawQuestions.flatMap((raw) => {
+    const item = object(raw); const prompt = string(item?.question); if (!prompt) return [];
+    const options = Array.isArray(item?.options) ? item.options.flatMap((rawOption) => {
+      const option = object(rawOption); const label = string(option?.label); const description = string(option?.description); return label ? [{ label, ...(description ? { description } : {}) }] : [];
+    }) : [];
+    return [{ prompt, header: string(item?.header) ?? "Question", options, multiple: false, custom: true }];
+  });
+  if (!questions.length) return undefined;
+  return { type: "question", id: callId, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), options: questions.flatMap((item) => item.options.map((option) => option.label)), questions, tool_call_id: callId, source: "codex-rollout", response_mode: "local", requested_at: ts, read_only: true };
 }
 async function mapLimit<T>(values: readonly T[], concurrency: number, operation: (value: T) => Promise<void>): Promise<void> {
   let index = 0;
@@ -59,7 +94,7 @@ async function mapLimit<T>(values: readonly T[], concurrency: number, operation:
   }));
 }
 
-export function parseCodexRolloutLine(line: string, fallbackSessionId: string, maxTextBytes = 64 * 1024): { meta?: RolloutMeta; event?: ParsedEvent } {
+export function parseCodexRolloutLine(line: string, fallbackSessionId: string, maxTextBytes = 64 * 1024): ParsedLine {
   let root: RecordValue;
   try { const parsed = object(JSON.parse(line)); if (!parsed) return {}; root = parsed; } catch { return {}; }
   const payload = object(root.payload); const ts = timestamp(root.timestamp);
@@ -77,11 +112,22 @@ export function parseCodexRolloutLine(line: string, fallbackSessionId: string, m
   }
   if (payloadType === "function_call") {
     const callId = string(payload.call_id) ?? stableId(fallbackSessionId, identity); const name = string(payload.name) ?? "tool";
-    return { event: { type: "tool_call", payload: { tool_call_id: callId, tool_name: name, input_summary: boundedText(payload.arguments, 2_000) }, id: stableId(fallbackSessionId, identity), ts } };
+    const pending = codexQuestion(payload, fallbackSessionId, ts);
+    return { event: { type: "tool_call", payload: { tool_call_id: callId, tool_name: name, input_summary: boundedText(payload.arguments, 2_000) }, id: stableId(fallbackSessionId, identity), ts }, ...(pending ? { pending } : {}) };
   }
   if (payloadType === "function_call_output") {
     const callId = string(payload.call_id) ?? stableId(fallbackSessionId, identity); const output = boundedText(payload.output, maxTextBytes);
-    return { event: { type: "tool_result", payload: { tool_call_id: callId, output_summary: output, is_error: false }, id: stableId(fallbackSessionId, identity), ts } };
+    return { event: { type: "tool_result", payload: { tool_call_id: callId, output_summary: output, is_error: false }, id: stableId(fallbackSessionId, identity), ts }, resolved_pending_id: callId };
+  }
+  if (payloadType === "custom_tool_call") {
+    const callId = string(payload.call_id) ?? stableId(fallbackSessionId, identity); const name = string(payload.name) ?? "tool";
+    const pending = escalatedCustomCall(payload, fallbackSessionId, ts);
+    return { event: { type: "tool_call", payload: { tool_call_id: callId, tool_name: name, input_summary: boundedText(payload.input, 2_000) }, id: stableId(fallbackSessionId, identity), ts }, ...(pending ? { pending } : {}) };
+  }
+  if (payloadType === "custom_tool_call_output") {
+    const callId = string(payload.call_id) ?? stableId(fallbackSessionId, identity); const output = boundedText(payload.output, maxTextBytes);
+    const denied = /aborted|denied|cancel|error|failed/i.test(output);
+    return { event: { type: "tool_result", payload: { tool_call_id: callId, output_summary: output, is_error: denied }, id: stableId(fallbackSessionId, identity), ts }, resolved_pending_id: callId, resolved_pending_resolution: denied ? "deny" : "approve" };
   }
   return {};
 }
@@ -128,7 +174,7 @@ export class CodexRolloutDiscovery {
   async start(): Promise<void> { await this.poll(); this.#timer = setInterval(() => void this.poll(), this.options.interval_ms ?? 2_000); this.#timer.unref(); }
   stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
   target(id: string): CommandTarget | undefined { return this.#present.has(id) && this.registry.get(id)?.read_only !== false ? new ReadOnlyCodexTarget() : undefined; }
-  harnesses(): HarnessDiscoveryStatus[] { return this.#available ? [{ harness_type: "codex", discovered_sessions: this.#present.size, attached_sessions: 0, capabilities: this.health() }] : []; }
+  harnesses(): HarnessDiscoveryStatus[] { return this.#available ? [{ harness_type: "codex", discovered_sessions: this.#present.size, attached_sessions: 0, discovered_session_ids: [...this.#present], attached_session_ids: [], capabilities: this.health() }] : []; }
   capabilities(): HarnessCapabilities | undefined {
     if (!this.#available) return undefined;
     const reason = "Codex rollout files are read-only; use 'rivetplane codex' for a managed app-server session";
@@ -207,14 +253,32 @@ export class CodexRolloutDiscovery {
     if (!meta) return undefined;
     const current = this.registry.get(meta.id); const controlled = current?.read_only === false && object(current.metadata)?.codex_control === "app-server";
     const recent = info.mtimeMs >= (this.options.now?.() ?? Date.now()) - (this.options.recent_window_ms ?? 24 * 60 * 60_000);
-    const session: Session = { id: meta.id, machine_id: this.machine_id, harness_type: "codex", cwd: meta.cwd, status: controlled ? current.status : "completed", created_at: meta.created_at,
-      last_activity_at: info.mtime.toISOString(), pending: controlled ? current.pending : null, title: current?.title, read_only: !controlled,
+    const pending = current?.pending ?? null;
+    const session: Session = { id: meta.id, machine_id: this.machine_id, harness_type: "codex", cwd: meta.cwd, status: controlled ? current.status : pending?.type === "question" ? "waiting_input" : pending ? "waiting_approval" : "completed", created_at: meta.created_at,
+      last_activity_at: info.mtime.toISOString(), pending, title: current?.title, read_only: !controlled,
       ...(meta.model_provider ? { model: { provider_id: meta.model_provider, model_id: "unknown" } } : {}),
       metadata: controlled ? current.metadata : { discovery: "rollout", activity: recent ? "recently_updated" : "persisted", live_process_attached: false, cli_version: meta.cli_version ?? "unknown" } };
     this.registry.upsert(session);
     for (const line of lines) {
       const parsed = parseCodexRolloutLine(line, meta.id, this.options.max_event_text_bytes); const event = parsed.event;
-      if (event) this.registry.append(meta.id, event.type, event.payload as never, { id: event.id, ts: event.ts });
+      if (event) {
+        this.registry.append(meta.id, event.type, event.payload as never, { id: event.id, ts: event.ts });
+        if (event.type === "user_message" && !this.registry.get(meta.id)?.title) {
+          const title = sessionTitle((event.payload as TranscriptEventPayloadMap["user_message"]).text); const latest = this.registry.get(meta.id);
+          if (title && latest) this.registry.upsert({ ...latest, title });
+        }
+      }
+      if (!controlled && parsed.pending) {
+        this.registry.setPending(meta.id, parsed.pending); this.registry.setStatus(meta.id, parsed.pending.type === "approval" ? "waiting_approval" : "waiting_input");
+        if (parsed.pending.type === "approval") this.registry.append(meta.id, "permission_request", { approval_id: parsed.pending.id, tool_name: parsed.pending.tool_name, tool_input_summary: parsed.pending.tool_input_summary }, { id: `${event?.id ?? parsed.pending.id}-permission`, ts: parsed.pending.requested_at });
+      }
+      if (!controlled && parsed.resolved_pending_id) {
+        const active = this.registry.get(meta.id)?.pending;
+        if (active && active.id === parsed.resolved_pending_id) {
+          this.registry.setPending(meta.id, null); this.registry.setStatus(meta.id, "completed");
+          if (active.type === "approval") this.registry.append(meta.id, "permission_response", { approval_id: active.id, resolution: parsed.resolved_pending_resolution ?? "deny" }, { id: `${event?.id ?? active.id}-permission`, ts: event?.ts });
+        }
+      }
     }
     const consumed = start + skippedBytes + forcedConsumed + Buffer.byteLength(complete);
     this.#checkpoints.sessions[meta.id] = { path, offset: consumed, size: info.size, mtime_ms: info.mtimeMs, inode: Number(info.ino), meta, ...(skippingLine ? { skipping_line: true } : {}) };

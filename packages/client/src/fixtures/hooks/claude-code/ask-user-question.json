@@ -1,0 +1,15 @@
+{
+  "session_id": "claude-session-full",
+  "transcript_path": "/repo/.claude/transcript.jsonl",
+  "cwd": "/repo",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_use_id": "toolu_question_full",
+  "tool_input": {
+    "questions": [
+      { "header": "Mode", "question": "Which mode?", "options": [{ "label": "Safe", "description": "No writes" }], "multiSelect": false },
+      { "header": "Checks", "question": "Which checks?", "options": [{ "label": "Tests" }, { "label": "Lint" }], "multiSelect": true }
+    ]
+  }
+}

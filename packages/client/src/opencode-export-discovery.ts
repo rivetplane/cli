@@ -239,7 +239,7 @@ function questionFromPart(sessionId: string, part: RecordValue): Question | unde
   const callID = string(part.callID) ?? string(part.id) ?? stableId(sessionId, "question");
   return { type: "question", id: callID, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), header: questions.map((item) => item.header).join(" / "),
     options: questions.flatMap((item) => item.options.map((option) => option.label)), option_details: questions.flatMap((item) => item.options), questions,
-    tool_call_id: callID, read_only: true, requested_at: timestamp(object(state.time)?.start) };
+    tool_call_id: callID, source: "opencode-export", response_mode: "local", read_only: true, requested_at: timestamp(object(state.time)?.start) };
 }
 
 function approvalFromPart(sessionId: string, part: RecordValue): PendingInteraction | undefined {
@@ -252,7 +252,7 @@ function approvalFromPart(sessionId: string, part: RecordValue): PendingInteract
   const id = string(explicit?.id) ?? string(explicit?.requestID) ?? string(part.callID) ?? string(part.id);
   if (!id) return undefined;
   return { type: "approval", id, session_id: sessionId, tool_name: string(explicit?.permission) ?? string(explicit?.tool) ?? tool,
-    tool_input_summary: summary(input), requested_at: timestamp(object(explicit?.time)?.created ?? object(state.time)?.start), read_only: true };
+    tool_input_summary: summary(input), source: "opencode-export", response_mode: "local", requested_at: timestamp(object(explicit?.time)?.created ?? object(state.time)?.start), read_only: true };
 }
 
 function detectPending(sessionId: string, messages: Array<{ info: RecordValue; parts: RecordValue[] }>): PendingInteraction | undefined {
@@ -545,6 +545,11 @@ export class OpenCodeExportDiscovery {
     const newer = checkpoint.updated === undefined || (currentEpoch !== undefined && priorEpoch !== undefined ? currentEpoch > priorEpoch : exportUpdated !== undefined && exportUpdated !== checkpoint.updated);
     const pending = foundPending ?? (checkpoint.pending && !terminal.has(checkpoint.pending.id) && !newer ? checkpoint.pending : undefined); const identity = latestIdentity(messages);
     const current = this.registry.get(id); const time = object(info.time);
+    const currentMetadata = object(current?.metadata) ?? {}; const hookPending = object(currentMetadata.hook_pending) ?? {};
+    const livePluginPending = currentMetadata.transport === "opencode-plugin"
+      && currentMetadata.hook_mode === "actionable"
+      && current?.pending?.read_only !== true
+      && hookPending.id === current?.pending?.id;
     this.registry.upsert({ id, machine_id: this.machine_id, harness_type: "opencode", cwd: string(info.directory) ?? listed.directory ?? current?.cwd ?? "",
       status: current?.status ?? "waiting_input", created_at: timestamp(time?.created ?? listed.created), last_activity_at: timestamp(time?.updated ?? listed.updated ?? time?.created),
       pending: current?.pending ?? null, title: string(info.title) ?? listed.title, ...identity, read_only: true,
@@ -553,7 +558,9 @@ export class OpenCodeExportDiscovery {
     if (pending?.type === "approval" && checkpoint.pending?.id !== pending.id) this.registry.append(id, "permission_request", {
       approval_id: pending.id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary,
     }, { id: stableId(id, pending.id, "permission_request"), ts: pending.requested_at });
-    this.registry.setPending(id, pending ?? null); this.registry.setStatus(id, statusFromExport(info, messages, pending));
+    if (!livePluginPending) {
+      this.registry.setPending(id, pending ?? null); this.registry.setStatus(id, statusFromExport(info, messages, pending));
+    }
     checkpoint.updated = exportUpdated; checkpoint.pending = pending;
     this.#checkpoints.sessions[id] = checkpoint;
   }

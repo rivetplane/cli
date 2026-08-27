@@ -82,7 +82,7 @@ try {
   assert.match(help, /--no-codex/, "installed CLI does not document Codex rollout discovery");
   assert.match(help, /--no-claude-code/, "installed CLI does not document Claude Code discovery");
   assert.equal(run(binary, ["--version"], { cwd: installDirectory }), packageJson.version);
-  assert.match(run("npx", ["--yes", "--package", tarball, "rivetplane", "--help"], { cwd: npxDirectory }), /Usage:\s+rivetplane/);
+  assert.match(run("npx", ["--yes", `--package=${tarball}`, "--call", "rivetplane --help"], { cwd: npxDirectory }), /Usage:\s+rivetplane/);
 
   const env = { ...process.env, HOME: homeDirectory, XDG_CONFIG_HOME: join(homeDirectory, ".config") };
   assert.match(run(binary, ["login", "--server", "https://example.invalid", "--machine", "package-test", "--token", "test-token"], { cwd: installDirectory, env }), /Paired machine/);

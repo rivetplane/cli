@@ -1,0 +1,7 @@
+{
+  "id": "event-idle-full",
+  "type": "session.idle",
+  "properties": {
+    "sessionID": "opencode-session-full"
+  }
+}

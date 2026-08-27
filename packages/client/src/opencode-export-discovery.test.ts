@@ -83,6 +83,29 @@ test("discovers one full pending question, deduplicates polls and restart, then 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("does not replace a live plugin question with its read-only export alias", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-live-plugin-"));
+  const running = await fixture("export-question-running.json");
+  const runner: CommandRunner = async (_program, args) => args.includes("list")
+    ? { stdout: JSON.stringify([{ id: "ses_question", directory, created: 1, updated: 2 }]), stderr: "" }
+    : { stdout: running, stderr: "" };
+  try {
+    const registry = new SessionRegistry();
+    registry.upsert({
+      id: "ses_question", machine_id: "machine-1", harness_type: "opencode", cwd: directory,
+      status: "waiting_input", created_at: new Date(1).toISOString(), last_activity_at: new Date(2).toISOString(),
+      pending: { type: "question", id: "que_native_1", session_id: "ses_question", prompt: "Which deployment mode should I use?", requested_at: new Date(2).toISOString(), read_only: false },
+      read_only: false, metadata: { transport: "opencode-plugin", hook_mode: "actionable", hook_pending: { id: "que_native_1" } },
+    }, { authority: 80 });
+    const manager = new OpenCodeExportDiscovery("machine-1", registry, { executable: process.execPath, checkpoint_path: join(directory, "cp.json"), runner, recent_window_ms: Number.MAX_SAFE_INTEGER });
+    await manager.poll();
+    assert.equal(registry.get("ses_question")?.pending?.id, "que_native_1");
+    assert.equal(registry.get("ses_question")?.pending?.read_only, false);
+    assert.equal(registry.get("ses_question")?.read_only, false);
+    manager.stop();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("does not infer an approval from an unrelated running tool", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rivetplane-opencode-no-approval-"));
   const exportValue = { info: { id: "ses_bash", directory, time: { created: 1, updated: 2 } }, messages: [{ info: { id: "m1", role: "assistant", time: { created: 1 } }, parts: [{ id: "p1", type: "tool", callID: "bash-1", tool: "bash", state: { status: "running", input: { command: "npm test" }, time: { start: 1 } } }] }] };

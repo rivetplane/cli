@@ -1,0 +1,12 @@
+{
+  "id": "event-question-full",
+  "type": "question.asked",
+  "properties": {
+    "id": "question-full",
+    "sessionID": "opencode-session-full",
+    "questions": [
+      { "header": "Mode", "question": "Which mode?", "options": [{ "label": "Safe", "description": "No writes" }], "multiple": false },
+      { "header": "Checks", "question": "Which checks?", "options": [{ "label": "Tests" }, { "label": "Lint" }], "multiple": true }
+    ]
+  }
+}

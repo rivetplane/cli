@@ -9,6 +9,7 @@ import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CreateSessionCommand } from "@rivetplane/shared/protocol";
 import WebSocket from "ws";
 import type { CommandTarget } from "./relay.js";
+import { normalizeApprovalInput } from "./pending-normalization.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
 
@@ -116,7 +117,10 @@ export class CodexAppServerManager {
     if (this.options.managed && this.#token_path) await unlink(this.#token_path).catch(() => undefined);
   }
   target(id: string): CommandTarget | undefined { return this.#online && this.#threads.has(id) ? new CodexTarget(this, id) : undefined; }
-  harnesses(): HarnessDiscoveryStatus[] { return this.#endpoint ? [{ harness_type: "codex", discovered_sessions: this.#threads.size, attached_sessions: this.#online ? this.#threads.size : 0, capabilities: this.health() }] : []; }
+  harnesses(): HarnessDiscoveryStatus[] {
+    const ids = [...this.#threads.keys()]; const attached = this.#online ? [...this.#threads].filter(([, state]) => state.loaded).map(([id]) => id) : [];
+    return this.#endpoint ? [{ harness_type: "codex", discovered_sessions: ids.length, attached_sessions: attached.length, discovered_session_ids: ids, attached_session_ids: attached, capabilities: this.health() }] : [];
+  }
   health() {
     const support = (value: boolean, reason: string) => value ? { supported: true, mode: "read_write" as const } : { supported: false, mode: "unsupported" as const, reason };
     const offline = "The Codex app-server transport is not connected.";
@@ -131,7 +135,9 @@ export class CodexAppServerManager {
     if (!this.#online) throw new Error("Codex app-server is not connected");
     const result = object(await this.#request("thread/start", { cwd: command.cwd, model: command.model.model_id, approvalPolicy: "untrusted", sandbox: "workspace-write", serviceName: "rivetplane" }));
     const thread = object(result?.thread); const id = string(thread?.id); if (!thread || !id) throw new Error("Codex thread/start returned no thread ID");
-    this.#syncThread(thread); const state = this.#threads.get(id)!; state.loaded = true; state.retain_until = (this.options.now?.() ?? Date.now()) + (this.options.new_thread_grace_ms ?? 60_000); return id;
+    this.#syncThread(thread); const state = this.#threads.get(id)!; state.loaded = true; state.retain_until = (this.options.now?.() ?? Date.now()) + (this.options.new_thread_grace_ms ?? 60_000); this.#markControlled(id);
+    if (command.title) await this.setThreadName(id, command.title);
+    return id;
   }
 
   async poll(): Promise<void> {
@@ -150,13 +156,17 @@ export class CodexAppServerManager {
   }
 
   async sendMessage(threadId: string, text: string): Promise<void> {
-    const state = this.#requireThread(threadId); if (!state.loaded) { await this.#request("thread/resume", { threadId }); state.loaded = true; }
+    const state = this.#requireThread(threadId); if (!state.loaded) { await this.#request("thread/resume", { threadId }); state.loaded = true; this.#markControlled(threadId); }
     const result = object(await this.#request("turn/start", { threadId, clientUserMessageId: randomUUID(), input: [{ type: "text", text, text_elements: [] }] }));
     const turn = object(result?.turn); state.turn_id = string(turn?.id); this.#operations.messaging = true; this.registry.setStatus(threadId, "running");
   }
   async interrupt(threadId: string): Promise<void> {
     const state = this.#requireThread(threadId); if (!state.turn_id) throw new Error("Codex thread has no active turn to interrupt");
     await this.#request("turn/interrupt", { threadId, turnId: state.turn_id }); this.#operations.interrupt = true;
+  }
+  async setThreadName(threadId: string, name: string): Promise<void> {
+    this.#requireThread(threadId); await this.#request("thread/name/set", { threadId, name });
+    const current = this.registry.get(threadId); if (current) this.registry.upsert({ ...current, title: name });
   }
   async setCollaborationMode(threadId: string, mode: "default" | "plan"): Promise<void> {
     this.#requireThread(threadId);
@@ -245,7 +255,7 @@ export class CodexAppServerManager {
       const current = this.registry.get(id); const now = this.options.now?.() ?? Date.now();
       if (now < (state.retain_until ?? 0) || current?.status === "running" || current?.pending) continue;
       state.missing_polls = (state.missing_polls ?? 0) + 1; if (state.missing_polls < (this.options.missing_poll_limit ?? 3)) continue;
-      this.#threads.delete(id); if (object(current?.metadata)?.codex_control === "app-server") this.registry.remove(id);
+      this.#threads.delete(id); if (String(object(current?.metadata)?.codex_control).startsWith("app-server")) this.registry.remove(id);
     }
     const now = this.options.now?.() ?? Date.now(); const history = [...found].slice(0, Math.max(0, this.options.history_threads ?? 12)).filter((id) => {
       const state = this.#threads.get(id); return state && !state.history_loaded && now >= (state.history_retry_at ?? 0);
@@ -263,8 +273,8 @@ export class CodexAppServerManager {
     const id = string(thread.id)!; const current = this.registry.get(id); const state = this.#threads.get(id) ?? { loaded: false }; state.missing_polls = 0; this.#threads.set(id, state);
     const status = current?.pending?.type === "approval" ? "waiting_approval" : current?.pending?.type === "question" ? "waiting_input" : threadStatus(thread.status);
     this.registry.upsert({ id, machine_id: this.machine_id, harness_type: "codex", cwd: string(thread.cwd) ?? this.directory, status, created_at: isoSeconds(thread.createdAt), last_activity_at: isoSeconds(thread.updatedAt), pending: current?.pending ?? null,
-      title: string(thread.name) ?? string(thread.preview), read_only: false, ...(string(thread.modelProvider) ? { model: { provider_id: string(thread.modelProvider)!, model_id: "unknown" } } : {}),
-      metadata: { codex_control: "app-server", live_process_attached: true, transport: this.#transport, cli_version: string(thread.cliVersion) ?? this.#version, source: thread.source as never } });
+      title: string(thread.name) ?? string(thread.preview), read_only: !state.loaded, ...(string(thread.modelProvider) ? { model: { provider_id: string(thread.modelProvider)!, model_id: "unknown" } } : {}),
+      metadata: { codex_control: state.loaded ? "app-server" : "app-server-history", live_process_attached: state.loaded, transport: this.#transport, cli_version: string(thread.cliVersion) ?? this.#version, source: thread.source as never } });
   }
   async #readThread(threadId: string): Promise<void> {
     const response = object(await this.#request("thread/read", { threadId, includeTurns: true })); const thread = object(response?.thread); if (!thread) return;
@@ -289,25 +299,32 @@ export class CodexAppServerManager {
   #serverRequest(method: string, rpcId: RpcId, params: RecordValue): void {
     if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
       const threadId = string(params.threadId); if (!threadId || !this.registry.get(threadId)) { this.#send({ id: rpcId, error: { code: -32602, message: "Unknown thread" } }); return; }
-      const id = String(rpcId); const pending: PendingInteraction = { type: "approval", id, session_id: threadId, tool_name: method.includes("commandExecution") ? "commandExecution" : "fileChange", tool_input_summary: summary(params.command ?? params.reason ?? params), requested_at: new Date(number(params.startedAtMs) ?? Date.now()).toISOString() };
+      this.#markControlled(threadId);
+      const id = String(rpcId); const details = normalizeApprovalInput({ command: params.command, description: params.reason });
+      const pending: PendingInteraction = { type: "approval", id, session_id: threadId, tool_name: method.includes("commandExecution") ? "commandExecution" : "fileChange", tool_input_summary: details.summary,
+        ...(details.command ? { command: details.command } : {}), ...(details.description ? { description: details.description } : {}),
+        source: "codex-app-server", response_mode: "remote", requested_at: new Date(number(params.startedAtMs) ?? Date.now()).toISOString() };
       this.#pending.set(id, { rpc_id: rpcId, method, params }); this.registry.setPending(threadId, pending); this.registry.append(threadId, "permission_request", { approval_id: id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary }, { id: `codex-request-${requestKey(rpcId)}` }); this.registry.setStatus(threadId, "waiting_approval"); return;
     }
     if (method === "item/tool/requestUserInput") {
       const threadId = string(params.threadId); if (!threadId || !this.registry.get(threadId)) { this.#send({ id: rpcId, error: { code: -32602, message: "Unknown thread" } }); return; }
+      this.#markControlled(threadId);
       const questions = array(params.questions).map(object).filter((item): item is RecordValue => Boolean(item)); const id = String(rpcId);
       const pending: PendingInteraction = { type: "question", id, session_id: threadId, prompt: questions.map((item) => string(item.question) ?? "").join("\n"), header: questions.map((item) => string(item.header) ?? "").join(" / "),
         options: questions.flatMap((item) => questionOptions(item.options).map((option) => option.label)), option_details: questions.flatMap((item) => questionOptions(item.options)),
-        questions: questions.map((item) => ({ prompt: string(item.question) ?? "", header: string(item.header) ?? "", options: questionOptions(item.options), custom: item.isOther === true })), tool_call_id: string(params.itemId), requested_at: new Date().toISOString() };
+        questions: questions.map((item) => ({ prompt: string(item.question) ?? "", header: string(item.header) ?? "", options: questionOptions(item.options), custom: item.isOther === true })), tool_call_id: string(params.itemId), source: "codex-app-server", response_mode: "remote", requested_at: new Date().toISOString() };
       this.#pending.set(id, { rpc_id: rpcId, method, params }); this.registry.setPending(threadId, pending); this.registry.setStatus(threadId, "waiting_input"); return;
     }
     this.#send({ id: rpcId, error: { code: -32601, message: `Unsupported server request: ${method}` } }); this.#diagnostic(method);
   }
   #notification(method: string, params: RecordValue): void {
+    // This official process-level notification has no session state for Rivetplane.
+    if (method === "remoteControl/status/changed") return;
     const threadId = string(params.threadId); if (method === "turn/started" && threadId) { const turn = object(params.turn); const state = this.#threads.get(threadId); if (state) state.turn_id = string(turn?.id); if (this.registry.get(threadId)) this.registry.setStatus(threadId, "running"); return; }
     if (method === "turn/completed" && threadId) { const turn = object(params.turn); const state = this.#threads.get(threadId); if (state) state.turn_id = undefined; if (this.registry.get(threadId)) this.registry.setStatus(threadId, string(turn?.status) === "failed" ? "error" : "waiting_input"); return; }
     if ((method === "item/completed" || method === "item/started") && threadId) { const item = object(params.item); if (item) this.#syncItem(threadId, item, number(params.completedAtMs ?? params.startedAtMs)); return; }
     if (method === "item/agentMessage/delta" && threadId) { const delta = string(params.delta); const itemId = string(params.itemId); if (delta && itemId && this.registry.get(threadId)) { const count = (this.#delta_counts.get(itemId) ?? 0) + 1; this.#delta_counts.set(itemId, count); this.#streamed_items.add(itemId); this.registry.append(threadId, "agent_message", { text: delta }, { id: `codex-delta-${itemId}-${count}` }); } return; }
-    if (["thread/started", "thread/status/changed", "thread/name/updated"].includes(method)) { const thread = object(params.thread); if (thread?.id) this.#syncThread(thread); return; }
+    if (["thread/started", "thread/status/changed", "thread/name/updated"].includes(method)) { const thread = object(params.thread); const id = string(thread?.id); if (thread && id) { if (method === "thread/started") { const state = this.#threads.get(id) ?? { loaded: true }; state.loaded = true; this.#threads.set(id, state); } this.#syncThread(thread); } return; }
     if (method === "error" || method === "warning") { this.registry.emit("warning", new Error(`Codex ${method}: ${summary(params, 1_000)}`)); return; }
     if (!method.startsWith("account/") && !method.startsWith("serverRequest/")) this.#diagnostic(method);
   }
@@ -330,7 +347,8 @@ export class CodexAppServerManager {
     });
   }
   #send(message: unknown): void { if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) throw new Error("Codex app-server is not connected"); this.#socket.send(JSON.stringify(message)); }
-  #close(error: Error): void { const socket = this.#socket; this.#socket = undefined; this.#online = false; this.#operations.live_attachment = false; if (socket && socket.readyState === WebSocket.OPEN) socket.close(); for (const request of this.#requests.values()) { clearTimeout(request.timer); request.reject(error); } this.#requests.clear(); this.#pending.clear(); for (const id of this.#threads.keys()) { const current = this.registry.get(id); if (object(current?.metadata)?.codex_control === "app-server") this.registry.remove(id); } this.#threads.clear(); }
+  #close(error: Error): void { const socket = this.#socket; this.#socket = undefined; this.#online = false; this.#operations.live_attachment = false; if (socket && socket.readyState === WebSocket.OPEN) socket.close(); for (const request of this.#requests.values()) { clearTimeout(request.timer); request.reject(error); } this.#requests.clear(); this.#pending.clear(); for (const id of this.#threads.keys()) { const current = this.registry.get(id); if (String(object(current?.metadata)?.codex_control).startsWith("app-server")) this.registry.remove(id); } this.#threads.clear(); }
+  #markControlled(id: string): void { const state = this.#threads.get(id); const current = this.registry.get(id); if (!state || !current) return; state.loaded = true; this.registry.upsert({ ...current, read_only: false, metadata: { ...object(current.metadata), codex_control: "app-server", live_process_attached: true } }); }
   #requireThread(id: string): ThreadState { const state = this.#threads.get(id); if (!state) throw new Error(`Codex thread ${id} is not attached`); return state; }
   #disableMethod(method: string): void { if (method === "turn/start") this.#operations.messaging = false; else if (method === "turn/interrupt") this.#operations.interrupt = false; }
   #retryDelay(attempts: number): number { return Math.min(this.options.max_retry_ms ?? 5 * 60_000, (this.options.retry_base_ms ?? 30_000) * 2 ** Math.max(0, attempts - 1)); }

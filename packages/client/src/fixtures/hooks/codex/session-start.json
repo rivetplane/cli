@@ -1,0 +1,9 @@
+{
+  "cwd": "/work/repo",
+  "hook_event_name": "SessionStart",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "default",
+  "session_id": "019c-codex-session-full",
+  "source": "startup",
+  "transcript_path": null
+}

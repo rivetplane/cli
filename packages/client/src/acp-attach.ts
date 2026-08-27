@@ -1,6 +1,7 @@
 import type { ApprovalScope, JsonValue, Session } from "@rivetplane/shared/model";
 import { EventEmitter } from "node:events";
 import type { AcpSessionDescriptor } from "./discovery.js";
+import { normalizeApprovalInput } from "./pending-normalization.js";
 import { SessionRegistry } from "./registry.js";
 import { JsonRpcPeer } from "./rpc.js";
 
@@ -141,11 +142,12 @@ export class ACPAttach extends EventEmitter {
       ...(string(item.name) ? { name: string(item.name) } : {}),
     })).filter((item) => item.optionId) : [];
     if (this.#pending) this.#pending.reject(new Error("A newer pending interaction replaced this request"));
+    const rawInput = toolCall.rawInput ?? toolCall.content ?? toolCall; const details = normalizeApprovalInput(rawInput);
     this.registry.setPending(this.descriptor.session_id, {
       type: "approval", id, session_id: this.descriptor.session_id,
       tool_name: string(toolCall.title) || string(toolCall.kind, "tool"),
-      tool_input_summary: summary(toolCall.rawInput ?? toolCall.content ?? toolCall),
-      requested_at: new Date().toISOString(),
+      tool_input_summary: details.summary, ...(details.command ? { command: details.command } : {}), ...(details.description ? { description: details.description } : {}),
+      source: "acp", response_mode: "remote", requested_at: new Date().toISOString(),
     });
     this.registry.append(this.descriptor.session_id, "permission_request", {
       approval_id: id,
@@ -163,7 +165,7 @@ export class ACPAttach extends EventEmitter {
     const options = Array.isArray(params.options) ? params.options.filter((item): item is string => typeof item === "string") : undefined;
     this.registry.setPending(this.descriptor.session_id, {
       type: "question", id, session_id: this.descriptor.session_id, prompt,
-      ...(options ? { options } : {}), requested_at: new Date().toISOString(),
+      ...(options ? { options } : {}), source: "acp", response_mode: "remote", requested_at: new Date().toISOString(),
     });
     this.registry.setStatus(this.descriptor.session_id, "waiting_input");
     return new Promise((resolve, reject) => { this.#pending = { id, kind: "question", resolve: method === "elicitation" ? (answer) => resolve(answer) : resolve, reject }; });

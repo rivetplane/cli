@@ -1,0 +1,7 @@
+{
+  "session_id": "claude-session-full",
+  "transcript_path": "/repo/.claude/transcript.jsonl",
+  "cwd": "/repo",
+  "hook_event_name": "SessionEnd",
+  "reason": "other"
+}

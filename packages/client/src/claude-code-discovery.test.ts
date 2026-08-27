@@ -30,7 +30,7 @@ test("parses machine-wide agents and keeps stable Claude session IDs", async () 
 test("discovers outside the client cwd, hides subagents, tails once, and reports a safe question", async () => {
   const env = await setup(); let agents = parseClaudeAgents(await fixture("agents-question.json")); const registry = new SessionRegistry();
   try {
-    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, directory: join(env.root, "different-start-directory"), config_dir: env.config, checkpoint_path: join(env.root, "checkpoint.json"), runner: runner(() => agents) });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, directory: join(env.root, "different-start-directory"), config_dir: env.config, checkpoint_path: join(env.root, "checkpoint.json"), runner: runner(() => agents), question_grace_ms: 0 });
     await manager.poll(); const session = registry.get(sessionId); const pending = session?.pending?.type === "question" ? session.pending : undefined;
     assert.equal(registry.list().length, 1); assert.equal(session?.cwd, "/private/tmp/claude-project"); assert.equal(session?.title, "Disposable test"); assert.equal(session?.status, "waiting_input"); assert.equal(session?.read_only, true);
     assert.equal(pending?.id, "toolu_exact_question"); assert.equal(pending?.tool_call_id, "toolu_exact_question"); assert.equal(pending?.read_only, true); assert.deepEqual(pending?.options, ["Blue", "Green"]);
@@ -54,6 +54,64 @@ test("fails closed for an observed permission wait without an exact request ID",
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });
 
+test("does not clear a question supplied by the live Claude hook", async () => {
+  const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json")); agents[0] = { ...agents[0]!, waitingFor: undefined, state: "working" };
+  const requestedAt = "2026-08-25T15:41:40.000Z"; const pending = { type: "question" as const, id: "hook-question-1", session_id: sessionId, prompt: "Choose a lane", options: ["Stable", "Beta"], requested_at: requestedAt };
+  try {
+    const registry = new SessionRegistry();
+    registry.upsert({ id: sessionId, machine_id: "machine-1", harness_type: "claude-code", cwd: "/private/tmp/claude-project", status: "waiting_input", created_at: requestedAt, last_activity_at: requestedAt, pending, metadata: { hook_pending: { id: pending.id } } }, { authority: 80 });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "hook-pending.json"), runner: runner(() => agents) });
+    await manager.poll();
+    assert.deepEqual(registry.get(sessionId)?.pending, pending);
+    manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
+test("does not replace an actionable hook question with its read-only transcript copy", async () => {
+  const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
+  const requestedAt = "2026-08-25T15:41:40.000Z";
+  const pending = { type: "question" as const, id: "rivetplane-hook-question", session_id: sessionId, prompt: "Which test color should I use?", options: ["Blue", "Green"], requested_at: requestedAt, source: "claude-code-hook-command", response_mode: "remote" as const, read_only: false };
+  try {
+    const registry = new SessionRegistry();
+    registry.upsert({ id: sessionId, machine_id: "machine-1", harness_type: "claude-code", cwd: "/private/tmp/claude-project", status: "waiting_input", created_at: requestedAt, last_activity_at: requestedAt, pending, metadata: { hook_pending: { id: pending.id } } }, { authority: 80 });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "hook-collision.json"), runner: runner(() => agents) });
+    await manager.poll();
+    assert.deepEqual(registry.get(sessionId)?.pending, pending);
+    manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
+test("waits briefly for the actionable Claude hook before publishing transcript-only pending state", async () => {
+  const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
+  try {
+    const registry = new SessionRegistry();
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "grace.json"), runner: runner(() => agents), question_grace_ms: 1_000 });
+    await manager.poll();
+    assert.equal(registry.get(sessionId)?.pending, null);
+    const requestedAt = new Date().toISOString();
+    const hook = { type: "question" as const, id: "rivetplane-live-question", session_id: sessionId, prompt: "Which test color should I use?", options: ["Blue", "Green"], requested_at: requestedAt, source: "claude-code-hook-command", response_mode: "remote" as const, read_only: false };
+    const current = registry.get(sessionId)!;
+    registry.upsert({ ...current, pending: hook, read_only: false, metadata: { hook_pending: { id: hook.id } } }, { authority: 80 });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.deepEqual(registry.get(sessionId)?.pending, hook);
+    manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
+test("publishes a transcript-only Claude question after the hook grace period", async () => {
+  const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
+  try {
+    const registry = new SessionRegistry();
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "grace-fallback.json"), runner: runner(() => agents), question_grace_ms: 1_000 });
+    await manager.poll();
+    assert.equal(registry.get(sessionId)?.pending, null);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(registry.get(sessionId)?.pending?.id, "toolu_exact_question");
+    assert.equal(registry.get(sessionId)?.pending?.read_only, true);
+    manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
 test("accepts only an explicit exact-ID approval state and handles transcript truncation", async () => {
   const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json")); agents[0] = { ...agents[0]!, waitingFor: "permission prompt" };
   await writeFile(env.state, JSON.stringify({ sessionId, updatedAt: "2026-08-25T15:41:40.233Z", block: { permission: { id: "perm_exact_1", toolName: "Bash", input: { command: "touch proof" }, requestedAt: "2026-08-25T15:41:40.000Z" } } }));
@@ -68,7 +126,7 @@ test("accepts only an explicit exact-ID approval state and handles transcript tr
 test("continues bounded complete lines without waiting for more file data", async () => {
   const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
   try {
-    const registry = new SessionRegistry(); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "cp.json"), runner: runner(() => agents), max_lines_per_poll: 1 });
+    const registry = new SessionRegistry(); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "cp.json"), runner: runner(() => agents), max_lines_per_poll: 1, question_grace_ms: 0 });
     await manager.poll(); assert.equal(registry.transcript(sessionId).length, 1);
     await manager.poll(); assert.equal(registry.transcript(sessionId).length, 3); assert.equal(registry.get(sessionId)?.pending?.id, "toolu_exact_question"); manager.stop();
   } finally { await rm(env.root, { recursive: true, force: true }); }
@@ -86,7 +144,7 @@ test("runs discovery through a fake Claude process", async () => {
   const env = await setup(); const fake = join(env.root, "fake-claude.mjs"); const agentsPath = join(env.root, "agents.json");
   await writeFile(agentsPath, await fixture("agents-question.json")); await writeFile(fake, `import { readFileSync } from "node:fs";\nif (process.argv.includes("--version")) process.stdout.write("2.1.245 (Claude Code)\\n"); else if (process.argv.includes("--json")) process.stdout.write(readFileSync(process.argv[2], "utf8")); else process.exit(2);\n`);
   try {
-    const registry = new SessionRegistry(); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, executable_args: [fake, agentsPath], config_dir: env.config, checkpoint_path: join(env.root, "cp.json"), timeout_ms: 2_000 });
+    const registry = new SessionRegistry(); const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, executable_args: [fake, agentsPath], config_dir: env.config, checkpoint_path: join(env.root, "cp.json"), timeout_ms: 2_000, question_grace_ms: 0 });
     await manager.poll(); assert.equal(registry.get(sessionId)?.pending?.id, "toolu_exact_question"); manager.stop();
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });

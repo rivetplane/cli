@@ -1,0 +1,7 @@
+{
+  "cwd": "/work/repo",
+  "hook_event_name": "SessionEnd",
+  "reason": "other",
+  "session_id": "019c-codex-session-full",
+  "transcript_path": null
+}

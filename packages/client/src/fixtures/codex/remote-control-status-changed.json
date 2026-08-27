@@ -1,0 +1,9 @@
+{
+  "method": "remoteControl/status/changed",
+  "params": {
+    "status": "disabled",
+    "serverName": "Test Mac",
+    "installationId": "installation-test",
+    "environmentId": null
+  }
+}

@@ -13,6 +13,34 @@ npx rivetplane
 
 The login command uses `https://rivetplane.com`, opens Rivetplane in your browser, and stores a machine-scoped token in your user configuration directory. The second command starts ACP discovery, OpenCode export discovery, the local API, and the outbound relay. Keep it running while you use Rivetplane. Use `--server` only for a self-hosted control plane.
 
+## Event-driven hooks
+
+Rivetplane installs only the two native interfaces that have checked official configuration and event fixtures: Claude Code hooks and an OpenCode plugin. All other matrix entries are reported as unsupported and are not installed.
+
+```sh
+npx rivetplane hooks install
+npx rivetplane hooks install --harness claude-code
+```
+
+The installer prints a result for each harness. It skips a missing supported binary. It changes only marked Rivetplane entries or files and keeps unrelated user settings. It refuses to replace an unmarked standalone plugin file or a symbolic-link target.
+
+To remove the bridges:
+
+```sh
+npx rivetplane hooks uninstall
+npx rivetplane hooks uninstall --harness opencode
+```
+
+Set `RIVETPLANE_HOOKS_DISABLED=1` in one harness process to disable the bridge for that process. OpenCode question and permission bridges wait for up to 30 minutes so a remote user has time to respond; Claude keeps its shorter native-hook window. A bridge returns a neutral result after a timeout, so the native prompt stays available.
+
+The installer writes a Rivetplane-owned Node bridge at `~/.config/harness-cp/hooks/v1/bridge.cjs`. Installed Claude and OpenCode hooks call this versioned local bridge with absolute, quoted paths. They do not need a global `rivetplane` binary, an npm cache entry, or network package access after `npx rivetplane hooks install` exits. A full uninstall removes the bridge. The client writes a private hook discovery and secret file at `~/.config/harness-cp/hook-endpoint.json`. Global hooks use it to find the current loopback port, including a custom port or port `0`. Each hook POST must have the Rivetplane owner marker and secret. Missing, malformed, stale, refused, or timed-out discovery returns the native neutral JSON `{}` with exit code 0, so the harness keeps its native prompt. Unsafe file ownership or permissions, symbolic links, and non-loopback endpoints are rejected. A new client replaces a record unless its endpoint proves its Rivetplane identity with the record secret; a reused live PID is not sufficient.
+
+Codex hook installation is unsupported. Approval, question, message, and interrupt actions use only the supported Codex app-server. OpenCode live HTTP/SSE supports messages, interrupt, approval response, and question response. The OpenCode plugin supports exact permission and question replies when HTTP/SSE does not own the session. A read-only export record cannot replace live capabilities.
+
+See the [checked harness capability matrix](docs/harness-capabilities.md) for exact support and official interface links.
+
+Use `npx rivetplane claude -- [CLAUDE_OPTIONS]` to start Claude Code with a temporary, wrapper-injected hook settings file. Rivetplane deletes that temporary file when Claude exits. Existing plain Claude Code sessions remain read-only.
+
 ## Existing Claude Code sessions
 
 Rivetplane discovers active Claude Code sessions machine-wide with `claude agents --json`. The command does not depend on Rivetplane's current directory. Rivetplane tails the matching files under `~/.claude/projects`, keeps bounded checkpoints, and excludes Claude subagents and sidechains from the top-level session list.
@@ -49,7 +77,9 @@ Managed and direct HTTP sessions support messages, interrupts, approvals, and qu
 
 Rivetplane reads recent Codex rollout JSONL files from `~/.codex/sessions` by default. This discovery does not depend on the current directory. It relays at most 48 rollout sessions updated in the last 24 hours, scans the file roster every 30 seconds, and reports the sessions as read-only. It does not claim that a rollout is attached to a live process. Rivetplane cannot attach to an independently launched `codex app-server` process that uses stdio because that process owns its pipes.
 
-Run `npx rivetplane codex` to start a Rivetplane-managed Codex app-server. This mode supports session creation and recovery, streamed transcripts, messages, interrupts, command and file approvals, and supported user-input questions. It relays the 48 most recently updated threads and loads transcript history for at most 12 threads with two concurrent requests. It always keeps running, pending, and newly created threads during roster convergence. It uses a permission-protected Unix socket on macOS and Linux. It uses an authenticated loopback WebSocket on Windows. Rivetplane stops only the app-server process that it starts.
+Run `npx rivetplane hooks install --harness codex` to add the verified public Codex hooks under `${CODEX_HOME:-~/.codex}/hooks.json`. The installer preserves unrelated hooks and keeps `config.toml` unchanged. Start `codex` normally. At **Hooks need review**, choose **Review hooks**. Trust only the Rivetplane entries with `t`, then continue. Do not use `--dangerously-bypass-hook-trust`. Normal `codex` then reports session lifecycle, tool start/end telemetry, and a non-actionable approval attention item. Answer that approval in the local Codex terminal. The hook does not block Codex and never answers the native request. Codex does not expose `request_user_input` through this standalone hook interface.
+
+Run `npx rivetplane codex` to start a Rivetplane-managed Codex app-server. This mode supports session creation and recovery, streamed transcripts, messages, interrupts, command and file approvals, and supported user-input questions with exact native IDs. It relays the 48 most recently updated threads and loads transcript history for at most 12 threads with two concurrent requests. Historical `thread/list` results stay read-only until Rivetplane creates, resumes, or actively controls that thread. It always keeps running, pending, and newly created threads during roster convergence. It uses a permission-protected Unix socket on macOS and Linux. It uses an authenticated loopback WebSocket on Windows. Rivetplane stops only the app-server process that it starts.
 
 Use `--codex-endpoint URL` to connect to a supported shared listener. Put its bearer token in `HARNESS_CP_CODEX_TOKEN`; do not put the token on the command line. Use `--codex-sessions-dir`, `--codex-checkpoint`, `--codex-directory`, or `--codex-executable` to change the local defaults. Use `--no-codex` to disable rollout discovery.
 

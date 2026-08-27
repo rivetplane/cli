@@ -60,6 +60,7 @@ export interface ClaudeCodeDiscoveryOptions {
   concurrency?: number;
   retry_base_ms?: number;
   max_retry_ms?: number;
+  question_grace_ms?: number;
   now?: () => number;
   runner?: CommandRunner;
   platform?: NodeJS.Platform;
@@ -142,7 +143,7 @@ function questionFromTool(sessionId: string, tool: OpenTool, state: RecordValue 
   if (questions.length === 0 || stateQuestions.length === 0) return undefined;
   const prompts = new Set(stateQuestions.flatMap((value) => string(object(value)?.question) ? [string(object(value)?.question)!] : []));
   if (!questions.every((question) => prompts.has(question.prompt))) return undefined;
-  return { type: "question", id: tool.id, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), header: questions.map((item) => item.header).join(" / "), options: questions.flatMap((item) => item.options.map((option) => option.label)), option_details: questions.flatMap((item) => item.options), questions, tool_call_id: tool.id, read_only: true, requested_at: tool.requested_at };
+  return { type: "question", id: tool.id, session_id: sessionId, prompt: questions.map((item) => item.prompt).join("\n"), header: questions.map((item) => item.header).join(" / "), options: questions.flatMap((item) => item.options.map((option) => option.label)), option_details: questions.flatMap((item) => item.options), questions, tool_call_id: tool.id, source: "claude-code-state", response_mode: "local", read_only: true, requested_at: tool.requested_at };
 }
 
 function explicitApproval(sessionId: string, state: RecordValue | undefined): PendingInteraction | undefined {
@@ -150,7 +151,7 @@ function explicitApproval(sessionId: string, state: RecordValue | undefined): Pe
   if (!permission) return undefined;
   const id = string(permission.id ?? permission.requestId ?? permission.requestID ?? permission.toolUseId ?? permission.tool_use_id);
   if (!id) return undefined;
-  return { type: "approval", id, session_id: sessionId, tool_name: string(permission.toolName ?? permission.tool_name ?? permission.tool) ?? "permission", tool_input_summary: summary(permission.input ?? permission.description ?? permission), requested_at: timestamp(permission.requestedAt ?? permission.timestamp ?? state?.updatedAt), read_only: true };
+  return { type: "approval", id, session_id: sessionId, tool_name: string(permission.toolName ?? permission.tool_name ?? permission.tool) ?? "permission", tool_input_summary: summary(permission.input ?? permission.description ?? permission), source: "claude-code-state", response_mode: "local", requested_at: timestamp(permission.requestedAt ?? permission.timestamp ?? state?.updatedAt), read_only: true };
 }
 
 const CAPABILITY_REASON = "Claude Code has no documented local exact-ID reply API for an arbitrary active session; private cc-socks transport is disabled";
@@ -187,6 +188,7 @@ export class ClaudeCodeDiscovery {
   #nextPollAt = 0;
   #lastPollFailure: string | undefined;
   #syncFailures = new Map<string, { attempts: number; next_attempt_at: number }>();
+  #questionGrace = new Map<string, { fingerprint: string; timer: NodeJS.Timeout }>();
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: ClaudeCodeDiscoveryOptions = {}) {
     this.directory = options.directory ?? process.cwd();
@@ -195,7 +197,12 @@ export class ClaudeCodeDiscovery {
   }
 
   async start(): Promise<void> { await this.poll(); this.#timer = setInterval(() => void this.poll(), this.options.interval_ms ?? 2_000); this.#timer.unref(); }
-  stop(): void { if (this.#timer) clearInterval(this.#timer); this.#timer = undefined; }
+  stop(): void {
+    if (this.#timer) clearInterval(this.#timer);
+    this.#timer = undefined;
+    for (const grace of this.#questionGrace.values()) clearTimeout(grace.timer);
+    this.#questionGrace.clear();
+  }
   target(id: string): CommandTarget | undefined { return this.#present.has(id) ? new ReadOnlyClaudeTarget() : undefined; }
   get executable(): string | undefined { return this.#executable; }
   harnesses(): HarnessDiscoveryStatus[] { return this.#executable ? [{ harness_type: "claude-code", discovered_sessions: this.#present.size, attached_sessions: this.registry.list().filter((session) => session.harness_type === "claude-code").length, ...(this.#version ? { version: this.#version } : {}), capabilities: sessionCapabilities() }] : []; }
@@ -221,6 +228,7 @@ export class ClaudeCodeDiscovery {
       this.#pollFailures = 0; this.#nextPollAt = 0;
       const found = new Set(agents.map((agent) => agent.sessionId));
       for (const id of this.#present) if (!found.has(id)) {
+        this.#cancelQuestionGrace(id);
         this.registry.remove(id); this.#pathCache.delete(id); this.#syncFailures.delete(id);
       }
       this.#present = found;
@@ -260,11 +268,66 @@ export class ClaudeCodeDiscovery {
       const questions = Object.values(checkpoint.open_tools).filter((tool) => tool.name === "AskUserQuestion").map((tool) => questionFromTool(agent.sessionId, tool, state)).filter((value): value is Question => Boolean(value));
       if (questions.length === 1) pending = questions[0];
     } else if (wait.includes("permission")) pending = explicitApproval(agent.sessionId, state);
-    const currentPending = this.registry.get(agent.sessionId)?.pending ?? null;
-    if (JSON.stringify(currentPending) !== JSON.stringify(pending ?? null)) this.registry.setPending(agent.sessionId, pending ?? null);
+    const currentSession = this.registry.get(agent.sessionId); const currentPending = currentSession?.pending ?? null;
+    const hookMarker = object(object(currentSession?.metadata)?.hook_pending);
+    const hookPending = currentPending && string(hookMarker?.id) === currentPending.id ? currentPending : null;
+    // The live hook owns Claude's response callback. Transcript/state discovery
+    // can observe the same question under its native tool-use ID, but that
+    // read-only observation must never replace the actionable hook record.
+    this.#reconcilePending(agent.sessionId, currentPending, hookPending, pending);
     this.registry.setStatus(agent.sessionId, statusFromAgent(agent));
     const current = this.registry.get(agent.sessionId); if (current) this.registry.upsert({ ...current, last_activity_at: observedActivity });
     this.#checkpoints.sessions[agent.sessionId] = checkpoint;
+  }
+
+  #reconcilePending(sessionId: string, current: PendingInteraction | null, hook: PendingInteraction | null, discovered: PendingInteraction | undefined): void {
+    if (hook) {
+      this.#cancelQuestionGrace(sessionId);
+      if (JSON.stringify(current) !== JSON.stringify(hook)) this.registry.setPending(sessionId, hook);
+      return;
+    }
+    if (discovered?.type === "question" && discovered.read_only) {
+      if (current?.id === discovered.id) {
+        this.#cancelQuestionGrace(sessionId);
+        return;
+      }
+      if (current) this.registry.setPending(sessionId, null);
+      this.#scheduleQuestionGrace(sessionId, discovered);
+      return;
+    }
+    this.#cancelQuestionGrace(sessionId);
+    const next = discovered ?? null;
+    if (JSON.stringify(current) !== JSON.stringify(next)) this.registry.setPending(sessionId, next);
+  }
+
+  #scheduleQuestionGrace(sessionId: string, pending: PendingInteraction): void {
+    const delayMs = this.options.question_grace_ms ?? 2_500;
+    if (delayMs <= 0) {
+      this.registry.setPending(sessionId, pending);
+      return;
+    }
+    const fingerprint = JSON.stringify(pending);
+    const prior = this.#questionGrace.get(sessionId);
+    if (prior?.fingerprint === fingerprint) return;
+    if (prior) clearTimeout(prior.timer);
+    const timer = setTimeout(() => {
+      const scheduled = this.#questionGrace.get(sessionId);
+      if (!scheduled || scheduled.fingerprint !== fingerprint) return;
+      this.#questionGrace.delete(sessionId);
+      const current = this.registry.get(sessionId);
+      if (!current) return;
+      const marker = object(object(current.metadata)?.hook_pending);
+      const hookPending = current.pending && string(marker?.id) === current.pending.id;
+      if (!hookPending) this.registry.setPending(sessionId, pending);
+    }, delayMs);
+    timer.unref();
+    this.#questionGrace.set(sessionId, { fingerprint, timer });
+  }
+
+  #cancelQuestionGrace(sessionId: string): void {
+    const grace = this.#questionGrace.get(sessionId);
+    if (grace) clearTimeout(grace.timer);
+    this.#questionGrace.delete(sessionId);
   }
 
   async #readState(agent: ClaudeAgent): Promise<RecordValue | undefined> {
