@@ -37,6 +37,8 @@ export class OutboundRelay extends EventEmitter {
   #attempt = 0;
   #queue: ClientToServerMessage[] = [];
   #sessionQueue = new Map<string, Session>();
+  #transcriptQueue: ClientToServerMessage[] = [];
+  #drainTranscriptNext = false;
   #sessionDrain: NodeJS.Timeout | undefined;
   #externalToLocal = new Map<string, string>();
   #capabilityFingerprints = new Map<string, string>();
@@ -46,7 +48,13 @@ export class OutboundRelay extends EventEmitter {
     registry.on("session", (session: Session) => this.#sendSession(session));
     registry.on("transcript", (event) => {
       const session = registry.get(event.session_id); if (!session) return;
-      this.send({ type: "transcript.append", event: { ...event, session_id: this.#externalId(session) } });
+      // Transcript repair is lower priority than a live approval or question.
+      // Queue and throttle it so a busy rollout cannot fill the ordered socket
+      // ahead of a time-limited pending interaction.
+      if (this.#stopped) return;
+      this.#transcriptQueue.push({ type: "transcript.append", event: { ...event, session_id: this.#externalId(session) } });
+      if (this.#transcriptQueue.length > 10_000) this.#transcriptQueue.shift();
+      this.#scheduleSessionDrain();
     });
     registry.on("removed", (session_id: string) => {
       const external = [...this.#externalToLocal].find(([, local]) => local === session_id)?.[0] ?? session_id;
@@ -134,12 +142,18 @@ export class OutboundRelay extends EventEmitter {
   }
 
   #scheduleSessionDrain(): void {
-    if (this.#sessionDrain || this.#stopped || this.#sessionQueue.size === 0) return;
+    if (this.#sessionDrain || this.#stopped || (this.#sessionQueue.size === 0 && this.#transcriptQueue.length === 0)) return;
     this.#sessionDrain = setTimeout(() => {
       this.#sessionDrain = undefined;
       if (this.#socket?.readyState === WebSocket.OPEN) {
         const next = this.#sessionQueue.entries().next().value as [string, Session] | undefined;
-        if (next) { this.#sessionQueue.delete(next[0]); this.send({ type: "session.upsert", session: this.#namespace(next[1]) }); }
+        if (this.#drainTranscriptNext && this.#transcriptQueue.length > 0) this.send(this.#transcriptQueue.shift()!);
+        else if (next) { this.#sessionQueue.delete(next[0]); this.send({ type: "session.upsert", session: this.#namespace(next[1]) }); }
+        else {
+          const fallback = this.#transcriptQueue.shift();
+          if (fallback) this.send(fallback);
+        }
+        this.#drainTranscriptNext = !this.#drainTranscriptNext;
       }
       this.#scheduleSessionDrain();
     }, this.options.session_drain_interval_ms ?? 25);

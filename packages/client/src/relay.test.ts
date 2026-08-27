@@ -101,6 +101,24 @@ test("keeps a live pending interaction ahead of a large connected discovery refr
   } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
+test("keeps a live pending interaction ahead of a connected transcript flood", async () => {
+  const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
+  wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+  const registry = new SessionRegistry(); const now = new Date().toISOString();
+  registry.upsert({ id: "busy", machine_id: "m1", harness_type: "codex", cwd: "/tmp", status: "running", created_at: now, last_activity_at: now, pending: null });
+  registry.upsert({ id: "urgent", machine_id: "m1", harness_type: "claude-code", cwd: "/tmp", status: "running", created_at: now, last_activity_at: now, pending: null });
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined, { replay_delay_ms: 60_000, session_drain_interval_ms: 100 });
+  try {
+    relay.start(); await until(() => received.some((message) => message.type === "machine.hello"));
+    for (let index = 0; index < 500; index++) registry.append("busy", "tool_result", { tool_call_id: `call-${index}`, output_summary: `result-${index}`, is_error: false });
+    registry.setPending("urgent", { type: "question", id: "q-urgent", session_id: "urgent", prompt: "Answer now", requested_at: now });
+    await until(() => received.some((message) => message.type === "session.upsert" && (message.session as { pending?: { id?: string } }).pending?.id === "q-urgent"));
+    const pendingIndex = received.findIndex((message) => message.type === "session.upsert" && (message.session as { pending?: { id?: string } }).pending?.id === "q-urgent");
+    assert.ok(pendingIndex < 10); assert.ok(received.slice(0, pendingIndex).filter((message) => message.type === "transcript.append").length < 5);
+  } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
 test("caps reconnect snapshots and sends pending sessions first", async () => {
   const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
   wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
