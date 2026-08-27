@@ -17,6 +17,17 @@ test("parses supported rollout lines and ignores malformed or unknown schemas", 
   assert.deepEqual(parseCodexRolloutLine(lines.at(-1)!, "fallback"), {});
 });
 
+test("treats a missing Codex sessions directory as an inactive harness without warnings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-missing-"));
+  const registry = new SessionRegistry(); const warnings: unknown[] = [];
+  registry.on("warning", (warning) => warnings.push(warning));
+  const discovery = new CodexRolloutDiscovery("machine-1", registry, { sessions_directory: join(root, "missing"), checkpoint_path: join(root, "checkpoint.json") });
+  try {
+    await discovery.poll(); await discovery.poll();
+    assert.deepEqual(discovery.harnesses(), []); assert.deepEqual(warnings, []);
+  } finally { discovery.stop(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("discovers rollouts independent of cwd, deduplicates, checkpoints, and handles truncation", async () => {
   const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-rollout-")); const sessions = join(root, "sessions", "2026", "08", "25"); const checkpoint = join(root, "config", "checkpoint.json");
   await mkdir(sessions, { recursive: true }); const path = join(sessions, "rollout-test.jsonl"); const original = await readFile(fixture, "utf8"); await writeFile(path, original);
