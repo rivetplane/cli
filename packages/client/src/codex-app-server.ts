@@ -134,7 +134,9 @@ export class CodexAppServerManager {
     if (!this.#online) throw new Error("Codex app-server is not connected");
     const result = object(await this.#request("thread/start", { cwd: command.cwd, model: command.model.model_id, approvalPolicy: "untrusted", sandbox: "workspace-write", serviceName: "rivetplane" }));
     const thread = object(result?.thread); const id = string(thread?.id); if (!thread || !id) throw new Error("Codex thread/start returned no thread ID");
-    this.#syncThread(thread); const state = this.#threads.get(id)!; state.loaded = true; state.retain_until = (this.options.now?.() ?? Date.now()) + (this.options.new_thread_grace_ms ?? 60_000); this.#markControlled(id); return id;
+    this.#syncThread(thread); const state = this.#threads.get(id)!; state.loaded = true; state.retain_until = (this.options.now?.() ?? Date.now()) + (this.options.new_thread_grace_ms ?? 60_000); this.#markControlled(id);
+    if (command.title) await this.setThreadName(id, command.title);
+    return id;
   }
 
   async poll(): Promise<void> {

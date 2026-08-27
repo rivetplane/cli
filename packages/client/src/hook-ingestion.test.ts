@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { formatNativeResult, toHookEnvelope } from "./hook-bridge.js";
-import { HookIngestor } from "./hook-ingestion.js";
+import { DEFAULT_CLAUDE_QUESTION_WAIT_MS, HookIngestor } from "./hook-ingestion.js";
 import { SessionRegistry } from "./registry.js";
 
 const fixture = async <T>(...parts: string[]): Promise<T> => JSON.parse(await readFile(join(process.cwd(), "src", "fixtures", "hooks", ...parts), "utf8")) as T;
@@ -32,6 +32,7 @@ test("validates the official Claude PermissionRequest shape and exact bridge ide
 });
 
 test("answers a Claude question through PermissionRequest and observes native fallback without blocking", async (t) => {
+  assert.ok(DEFAULT_CLAUDE_QUESTION_WAIT_MS >= 60_000 && DEFAULT_CLAUDE_QUESTION_WAIT_MS < 125_000);
   const payload = await fixture<Record<string, unknown>>("claude-code", "ask-user-question.json");
   const permission = await fixture<Record<string, unknown>>("claude-code", "permission-request.json");
   const directory = await mkdtemp(join(tmpdir(), "rivetplane-claude-title-")); t.after(() => rm(directory, { recursive: true, force: true }));

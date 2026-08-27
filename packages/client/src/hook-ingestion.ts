@@ -7,7 +7,12 @@ import { SessionRegistry } from "./registry.js";
 
 export const HOOK_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_HOOK_WAIT_MS = 30 * 60_000;
-export const DEFAULT_CLAUDE_QUESTION_WAIT_MS = 15_000;
+// Claude's PermissionRequest hook is the only documented point where an
+// AskUserQuestion input can be replaced safely. Keep that waiter alive long
+// enough for the relay and a remote human response, while still returning
+// neutral before Claude's 125-second command-hook deadline so local fallback
+// remains fail-open.
+export const DEFAULT_CLAUDE_QUESTION_WAIT_MS = 110_000;
 export const DEFAULT_NATIVE_CONFIRMATION_WAIT_MS = 10_000;
 
 export type HookActionMode = "actionable" | "telemetry" | "lifecycle";
