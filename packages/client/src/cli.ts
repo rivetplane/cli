@@ -9,7 +9,7 @@ import { HarnessControlClient } from "./client.js";
 import { login, readCredentials, resolveServerUrl, writeCredentials } from "./credentials.js";
 import { emitHook } from "./hook-bridge.js";
 import { installHookBridge } from "./hook-bridge-install.js";
-import { claudeHookSettings, installHooks, uninstallHooks } from "./hook-install.js";
+import { claudeHookSettings, installHooks, refreshInstalledHooks, uninstallHooks } from "./hook-install.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -76,6 +76,8 @@ async function main(): Promise<void> {
   const explicitClaude = process.argv[2] === "claude";
   const attachOpenCode = explicitOpenCode;
   const credentials = await readCredentials();
+  const refreshedHooks = await refreshInstalledHooks();
+  for (const hook of refreshedHooks.filter((item) => item.status === "skipped")) process.stderr.write(`Warning: Could not refresh ${hook.harness} hooks: ${hook.reason ?? "unknown error"}\n`);
   const discoveryDirectory = flag("--discovery-dir");
   const localPort = Number(flag("--local-port") ?? process.env.HARNESS_CP_LOCAL_PORT ?? 41737);
   if (!Number.isInteger(localPort) || localPort < 0 || localPort > 65_535) throw new Error("--local-port must be a valid port");

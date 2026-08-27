@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { claudeHookSettings, codexHookSettings, HARNESS_HOOKS, installHooks, uninstallHooks } from "./hook-install.js";
+import { claudeHookSettings, codexHookSettings, HARNESS_HOOKS, installHooks, refreshInstalledHooks, uninstallHooks } from "./hook-install.js";
 import { defaultHookBridgePath } from "./hook-bridge-install.js";
 import { defaultHookDiscoveryPath } from "./hook-discovery.js";
 import { LocalApi } from "./local-api.js";
@@ -50,6 +50,18 @@ test("merges and uninstalls only owned Claude hook entries", async () => {
   await uninstallHooks({ home, env: {}, only: ["claude-code"], executable });
   const clean = JSON.parse(await readFile(config, "utf8")) as { theme: string; hooks: Record<string, unknown[]> };
   assert.equal(clean.theme, "dark"); assert.equal(clean.hooks.PostToolUse!.length, 1); assert.equal(JSON.stringify(clean).includes("user-script"), true);
+});
+
+test("refreshes only previously installed hooks with the current Node runtime", async () => {
+  const home = await mkdtemp(join(tmpdir(), "rivetplane-hook-refresh-")); const executable = async () => true;
+  await installHooks({ home, env: {}, only: ["claude-code"], executable });
+  const claudePath = join(home, ".claude", "settings.json");
+  const stale = (await readFile(claudePath, "utf8")).replaceAll(process.execPath, "/removed/node");
+  await writeFile(claudePath, stale);
+  const refreshed = await refreshInstalledHooks({ home, env: {}, executable });
+  assert.deepEqual(refreshed.map((item) => item.harness), ["claude-code"]);
+  assert.match(await readFile(claudePath, "utf8"), new RegExp(process.execPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  await assert.rejects(access(join(home, ".config", "opencode", "plugins", "rivetplane.ts")), /ENOENT/);
 });
 
 test("installs only harnesses with checked official configuration and event fixtures", async () => {
@@ -96,20 +108,18 @@ test("runs the generated OpenCode plugin with exact owner, payload, and answer a
   const writes: string[] = []; const commands: string[][] = []; let bridge = { decision: "answer", updated_input: { answers: [["Safe"], ["Tests", "Lint"]] } };
   const priorBun = (globalThis as { Bun?: unknown }).Bun;
   (globalThis as { Bun?: unknown }).Bun = { spawn(command: string[]) { commands.push(command); return { stdin: { write(value: string) { writes.push(value); }, end() {} }, stdout: JSON.stringify(bridge), exited: Promise.resolve(0) }; } };
-  const nativeRequests: Array<Record<string, unknown>> = [];
+  const nativeRequests: Array<{ kind: string; input: Record<string, unknown> }> = [];
   try {
     const plugin = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}`) as { Rivetplane(context: unknown): Promise<{ event(input: unknown): Promise<void> }> };
-    const hook = await plugin.Rivetplane({ directory: "/repo", serverUrl: new URL("http://127.0.0.1:4096"), client: { _client: { post(input: Record<string, unknown>) { nativeRequests.push(input); return {}; } } } });
+    const hook = await plugin.Rivetplane({ directory: "/repo", client: { question: { reply(input: Record<string, unknown>) { nativeRequests.push({ kind: "question", input }); return {}; } }, permission: { reply(input: Record<string, unknown>) { nativeRequests.push({ kind: "permission", input }); return {}; } } } });
     const question = JSON.parse(await readFile(join(process.cwd(), "src", "fixtures", "hooks", "opencode", "question-asked.json"), "utf8"));
     await hook.event({ event: question });
-    assert.equal(nativeRequests.length, 0); await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(nativeRequests[0]?.url, "/question/{requestID}/reply");
-    assert.deepEqual(nativeRequests[0]?.path, { requestID: "question-full" });
-    assert.deepEqual(nativeRequests[0]?.query, { directory: "/repo" });
-    assert.deepEqual(nativeRequests[0]?.body, { answers: [["Safe"], ["Tests", "Lint"]] });
+    assert.equal(nativeRequests.length, 1);
+    assert.equal(nativeRequests[0]?.kind, "question");
+    assert.deepEqual(nativeRequests[0]?.input, { requestID: "question-full", answers: [["Safe"], ["Tests", "Lint"]] });
     assert.deepEqual(JSON.parse(writes[0]!), question.properties); assert.equal(commands[0]?.[0], process.execPath); assert.equal(commands[0]?.[1], defaultHookBridgePath({}, home)); assert.equal(commands[0]?.includes("--owner"), true); assert.equal(commands[0]?.includes("rivetplane-hook-v1"), true);
-    bridge = { decision: "answer", updated_input: { answers: [["free text"], []] } }; await hook.event({ event: question }); await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(nativeRequests[1]?.body, { answers: [["free text"], []] });
+    bridge = { decision: "answer", updated_input: { answers: [["free text"], []] } }; await hook.event({ event: question });
+    assert.deepEqual(nativeRequests[1]?.input, { requestID: "question-full", answers: [["free text"], []] });
   } finally { (globalThis as { Bun?: unknown }).Bun = priorBun; }
 });
 

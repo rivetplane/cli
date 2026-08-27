@@ -262,7 +262,7 @@ export class HookIngestor {
         if (current?.id === pendingId) this.registry.setPending(sessionId, { ...current, read_only: true });
         reject(new Error("OpenCode did not confirm that the pending interaction was resolved"));
       }, this.confirmation_wait_ms);
-      confirmation.timer.unref(); this.#confirmations.set(key, confirmation);
+      this.#confirmations.set(key, confirmation);
     }) : Promise.resolve();
     if (session?.harness_type !== "opencode") { this.registry.setPending(sessionId, null); this.registry.setStatus(sessionId, "running"); }
     if (pending.type === "approval") {

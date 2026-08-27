@@ -6,7 +6,7 @@ import type { Credentials } from "./credentials.js";
 import { SessionRegistry } from "./registry.js";
 
 export interface CommandTarget { sendMessage(text: string): Promise<void>; respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void | Promise<void>; interrupt(): void | Promise<void> }
-interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[]; replay_delay_ms?: number; replay_interval_ms?: number; heartbeat_interval_ms?: number }
+interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[]; replay_delay_ms?: number; replay_interval_ms?: number; heartbeat_interval_ms?: number; session_drain_interval_ms?: number }
 
 const SNAPSHOT_SESSION_LIMIT = 16;
 const REPLAY_LIMIT_PER_SESSION = 20;
@@ -36,12 +36,14 @@ export class OutboundRelay extends EventEmitter {
   #stopped = true;
   #attempt = 0;
   #queue: ClientToServerMessage[] = [];
+  #sessionQueue = new Map<string, Session>();
+  #sessionDrain: NodeJS.Timeout | undefined;
   #externalToLocal = new Map<string, string>();
   #capabilityFingerprints = new Map<string, string>();
 
   constructor(private readonly credentials: Credentials, private readonly registry: SessionRegistry, private readonly target: (id: string) => CommandTarget | undefined, private readonly options: RelayOptions = {}) {
     super();
-    registry.on("session", (session: Session) => this.send({ type: "session.upsert", session: this.#namespace(session) }));
+    registry.on("session", (session: Session) => this.#sendSession(session));
     registry.on("transcript", (event) => {
       const session = registry.get(event.session_id); if (!session) return;
       this.send({ type: "transcript.append", event: { ...event, session_id: this.#externalId(session) } });
@@ -53,7 +55,7 @@ export class OutboundRelay extends EventEmitter {
   }
 
   start(): void { if (!this.#stopped) return; this.#stopped = false; this.#connect(); }
-  stop(): void { this.#stopped = true; if (this.#retry) clearTimeout(this.#retry); if (this.#heartbeat) clearInterval(this.#heartbeat); if (this.#replay) clearTimeout(this.#replay); this.#socket?.close(); }
+  stop(): void { this.#stopped = true; if (this.#retry) clearTimeout(this.#retry); if (this.#heartbeat) clearInterval(this.#heartbeat); if (this.#replay) clearTimeout(this.#replay); if (this.#sessionDrain) clearTimeout(this.#sessionDrain); this.#socket?.close(); }
   send(message: ClientToServerMessage): void {
     if (this.#socket?.readyState === WebSocket.OPEN) this.#socket.send(JSON.stringify(message));
     else { this.#queue.push(message); if (this.#queue.length > 10_000) this.#queue.shift(); }
@@ -85,6 +87,7 @@ export class OutboundRelay extends EventEmitter {
         } else if (message.type === "command.result" || message.type === "session.removed") essential.push(message);
       }
       for (const message of [...pending.values(), ...essential]) socket.send(JSON.stringify(message));
+      this.#scheduleSessionDrain();
       // Repair transcript history after live state has had time to settle. One
       // frame per tick keeps new approvals and questions ahead of old events.
       this.#scheduleReplay(socket, sessions);
@@ -106,9 +109,36 @@ export class OutboundRelay extends EventEmitter {
     socket.on("message", (data) => void this.#command(data.toString()));
     socket.on("error", (error) => this.emit("warning", error));
     socket.on("close", () => {
-      if (this.#heartbeat) clearInterval(this.#heartbeat); if (this.#replay) clearTimeout(this.#replay); this.#heartbeat = undefined; this.#replay = undefined; this.#socket = undefined; this.emit("offline");
+      if (this.#heartbeat) clearInterval(this.#heartbeat); if (this.#replay) clearTimeout(this.#replay); if (this.#sessionDrain) clearTimeout(this.#sessionDrain); this.#heartbeat = undefined; this.#replay = undefined; this.#sessionDrain = undefined; this.#socket = undefined; this.emit("offline");
       if (!this.#stopped) { const delay = Math.min(30_000, 500 * 2 ** this.#attempt++); this.#retry = setTimeout(() => this.#connect(), delay); this.#retry.unref(); }
     });
+  }
+
+  #sendSession(session: Session): void {
+    const id = this.#externalId(session);
+    if (session.pending) {
+      // Pending interactions are latency-sensitive. Remove any older ordinary
+      // snapshot for this session and put the actionable state straight onto
+      // the wire instead of behind a large discovery refresh.
+      this.#sessionQueue.delete(id);
+      this.send({ type: "session.upsert", session: this.#namespace(session) });
+      return;
+    }
+    this.#sessionQueue.set(id, session);
+    this.#scheduleSessionDrain();
+  }
+
+  #scheduleSessionDrain(): void {
+    if (this.#sessionDrain || this.#stopped || this.#sessionQueue.size === 0) return;
+    this.#sessionDrain = setTimeout(() => {
+      this.#sessionDrain = undefined;
+      if (this.#socket?.readyState === WebSocket.OPEN) {
+        const next = this.#sessionQueue.entries().next().value as [string, Session] | undefined;
+        if (next) { this.#sessionQueue.delete(next[0]); this.send({ type: "session.upsert", session: this.#namespace(next[1]) }); }
+      }
+      this.#scheduleSessionDrain();
+    }, this.options.session_drain_interval_ms ?? 25);
+    this.#sessionDrain.unref();
   }
 
   #sendCapabilities(socket: WebSocket, force = false): void {

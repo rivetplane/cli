@@ -36,12 +36,29 @@ test("detects and resolves explicit escalated Codex custom tool approvals", asyn
   } finally { discovery.stop(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("detects and resolves standalone Codex request_user_input questions as read-only", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-question-")); const sessions = join(root, "sessions"); const checkpoint = join(root, "checkpoint.json");
+  await mkdir(sessions, { recursive: true }); const path = join(sessions, "rollout-question.jsonl");
+  const meta = { timestamp: "2026-08-27T02:45:20.000Z", type: "session_meta", payload: { id: "codex-question", timestamp: "2026-08-27T02:45:20.000Z", cwd: "/tmp/repo", cli_version: "0.149.1", model_provider: "openai" } };
+  const request = { timestamp: "2026-08-27T02:45:29.000Z", type: "response_item", payload: { type: "function_call", name: "request_user_input", call_id: "call-question", arguments: JSON.stringify({ questions: [{ header: "Color", id: "color", question: "Choose a color.", options: [{ label: "Red", description: "Choose Red." }, { label: "Blue", description: "Choose Blue." }] }] }) } };
+  await writeFile(path, `${JSON.stringify(meta)}\n${JSON.stringify(request)}\n`);
+  const registry = new SessionRegistry(); const discovery = new CodexRolloutDiscovery("machine-1", registry, { sessions_directory: sessions, checkpoint_path: checkpoint, scan_interval_ms: 1 });
+  try {
+    await discovery.poll(); const pending = registry.get("codex-question")?.pending;
+    assert.equal(pending?.type, "question"); assert.equal(pending?.id, "call-question"); assert.equal(pending?.read_only, true); assert.deepEqual(pending?.type === "question" ? pending.options : [], ["Red", "Blue"]);
+    assert.equal(registry.get("codex-question")?.status, "waiting_input");
+    const output = { timestamp: "2026-08-27T02:46:00.000Z", type: "response_item", payload: { type: "function_call_output", call_id: "call-question", output: JSON.stringify({ color: "Blue" }) } };
+    await writeFile(path, `${JSON.stringify(meta)}\n${JSON.stringify(request)}\n${JSON.stringify(output)}\n`); await discovery.poll();
+    assert.equal(registry.get("codex-question")?.pending, null); assert.equal(registry.get("codex-question")?.status, "completed");
+  } finally { discovery.stop(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("discovers rollouts independent of cwd, deduplicates, checkpoints, and handles truncation", async () => {
   const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-rollout-")); const sessions = join(root, "sessions", "2026", "08", "25"); const checkpoint = join(root, "config", "checkpoint.json");
   await mkdir(sessions, { recursive: true }); const path = join(sessions, "rollout-test.jsonl"); const original = await readFile(fixture, "utf8"); await writeFile(path, original);
   const registry = new SessionRegistry(); const discovery = new CodexRolloutDiscovery("machine-1", registry, { sessions_directory: join(root, "sessions"), checkpoint_path: checkpoint, now: () => Date.parse("2026-08-25T10:01:00Z") });
   try {
-    await discovery.poll(); assert.equal(registry.get("019c-test-thread")?.cwd, "/tmp/disposable-repo"); assert.equal(registry.get("019c-test-thread")?.read_only, true);
+    await discovery.poll(); assert.equal(registry.get("019c-test-thread")?.cwd, "/tmp/disposable-repo"); assert.equal(registry.get("019c-test-thread")?.read_only, true); assert.equal(registry.get("019c-test-thread")?.title, "hello");
     assert.deepEqual({ harness_type: discovery.capabilities()?.harness_type, can_create_session: discovery.capabilities()?.can_create_session, transport: discovery.capabilities()?.transport }, { harness_type: "codex", can_create_session: false, transport: "codex-rollout-jsonl" });
     assert.equal(discovery.capabilities()?.session_capabilities?.discovery.mode, "read_only");
     assert.equal(registry.get("019c-test-thread")?.metadata && (registry.get("019c-test-thread")!.metadata as Record<string, unknown>).live_process_attached, false);

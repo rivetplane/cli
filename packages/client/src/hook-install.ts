@@ -40,6 +40,26 @@ export async function uninstallHooks(options: InstallerOptions = {}): Promise<In
   return applyHooks("uninstall", options);
 }
 
+/**
+ * Refresh only hook integrations the user has already installed.
+ *
+ * npx and version managers place Node in versioned directories. Rewriting the
+ * owned hook commands when the long-running client starts keeps their runtime
+ * path aligned with the Node executable that is demonstrably working now,
+ * without opting the user into any new harness integration.
+ */
+export async function refreshInstalledHooks(options: InstallerOptions = {}): Promise<InstallResult[]> {
+  const env = options.env ?? process.env; const home = options.home ?? homedir(); const only: string[] = [];
+  for (const definition of HARNESS_HOOKS.filter((item) => item.verified)) {
+    try {
+      if ((await readFile(configPath(definition, home, env), "utf8")).includes(HOOK_OWNER)) only.push(definition.harness);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return only.length ? applyHooks("install", { ...options, only }) : [];
+}
+
 export function claudeHookSettings(bridge: HookBridgeInstallation = hookBridgeInstallation()): Record<string, unknown> {
   const definition = HARNESS_HOOKS.find((item) => item.harness === "claude-code")!; const hooks: Record<string, unknown[]> = {};
   for (const event of definition.events) hooks[event] = [{ matcher: "*", hooks: [{ type: "command", command: bridge.command("claude-code", event), timeout: 125 }] }];
@@ -119,7 +139,26 @@ function extensionSource(definition: HarnessHookDefinition, bridge: HookBridgeIn
 function openCodePluginSource(bridge: HookBridgeInstallation): string {
   return `// ${HOOK_OWNER}
 // Generated from https://opencode.ai/docs/plugins/ and the official SDK event types.
-export const Rivetplane = async (ctx) => ({
+export const Rivetplane = async (ctx) => {
+  const rawPost = async (url, requestID, body) => {
+    const raw = ctx?.client?._client || ctx?.client?.client;
+    if (!raw || typeof raw.post !== "function") return false;
+    await raw.post({ url, path: { requestID }, body, throwOnError: true, headers: { "Content-Type": "application/json" } });
+    return true;
+  };
+  const replyPermission = async (requestID, reply) => {
+    if (await rawPost("/permission/{requestID}/reply", requestID, { reply })) return;
+    if (!ctx.client?.permission?.reply) throw new Error("OpenCode plugin client does not expose permission.reply");
+    const response = await ctx.client.permission.reply({ requestID, reply }, { throwOnError: true });
+    if (response?.error !== undefined) throw new Error("OpenCode permission response was rejected: " + JSON.stringify(response.error));
+  };
+  const replyQuestion = async (requestID, answers) => {
+    if (await rawPost("/question/{requestID}/reply", requestID, { answers })) return;
+    if (!ctx.client?.question?.reply) throw new Error("OpenCode plugin client does not expose question.reply");
+    const response = await ctx.client.question.reply({ requestID, answers }, { throwOnError: true });
+    if (response?.error !== undefined) throw new Error("OpenCode question response was rejected: " + JSON.stringify(response.error));
+  };
+  return ({
   event: async ({ event }) => {
     if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return;
     const props = event?.properties || {};
@@ -134,33 +173,18 @@ export const Rivetplane = async (ctx) => ({
       if (output) result = JSON.parse(output);
     } catch {}
     if (!request_id || result.decision === "neutral") return;
-    const nativeReply = async (path, requestID, body) => {
-      // OpenCode currently gives plugins the legacy SDK client, while question
-      // and permission replies are generated only on its underlying transport.
-      // Use the real instance routes through that transport. Because ctx.client
-      // belongs to this TUI's embedded server, this reaches the exact Deferred
-      // which emitted the hook instead of a separately discovered serve process.
-      const client = ctx.client?._client;
-      if (!client?.post) throw new Error("OpenCode plugin client does not expose its native transport");
-      const result = await client.post({ url: path, path: { requestID }, query: { directory: ctx.directory }, body, headers: { "content-type": "application/json" } });
-      if (result?.error !== undefined) throw new Error("OpenCode native response was not accepted: " + JSON.stringify(result.error));
-    };
-    const defer = (work) => {
-      // Let the question.asked listener return before resolving its native
-      // deferred. This also keeps the remote bridge independent of SDK latency.
-      setTimeout(() => void work().catch(() => undefined), 0);
-    };
     if (event.type === "permission.asked") {
       const reply = result.decision === "deny" ? "reject" : result.scope && result.scope !== "once" ? "always" : "once";
-      defer(() => nativeReply("/permission/{requestID}/reply", request_id, { reply }));
+      await replyPermission(request_id, reply);
     } else if (event.type === "question.asked" && result.decision === "answer") {
       const count = Array.isArray(props.questions) ? props.questions.length : 1;
       const supplied = result.updated_input?.answers;
       const answers = Array.isArray(supplied) ? Array.from({ length: count }, (_, index) => Array.isArray(supplied[index]) ? supplied[index] : []) : Array.from({ length: count }, (_, index) => index === 0 ? [result.response || ""] : []);
-      defer(() => nativeReply("/question/{requestID}/reply", request_id, { answers }));
+      await replyQuestion(request_id, answers);
     }
   },
-});
+  });
+};
 `;
 }
 
