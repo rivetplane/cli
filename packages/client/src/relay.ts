@@ -19,7 +19,7 @@ const REPLAY_INTERVAL_MS = 15_000;
 // The hosted store performs durable work for each relay frame. Keep background
 // session/transcript traffic below that write path's sustained rate so an
 // already-sent pending frame is not trapped behind server-side database work.
-const SESSION_DRAIN_INTERVAL_MS = 250;
+const SESSION_DRAIN_INTERVAL_MS = 1_000;
 
 function snapshotSessions(registry: SessionRegistry): Session[] {
   return registry.list().sort((left, right) => {
