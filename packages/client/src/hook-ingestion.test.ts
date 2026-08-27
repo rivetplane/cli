@@ -64,6 +64,7 @@ test("answers a Claude question through PermissionRequest and observes native fa
   assert.equal(registry.get(envelope.session_id)?.title, "Plan the release safely.");
   assert.equal(pending?.id, "toolu_question_full");
   assert.equal(pending?.read_only, true);
+  assert.equal(registry.get(envelope.session_id)?.read_only, true);
   assert.equal(hooks.target(envelope.session_id), undefined);
 });
 

@@ -219,7 +219,7 @@ export class HookIngestor {
     }
     this.registry.setPending(id, pending);
     const session = this.registry.get(id);
-    if (session) this.registry.upsert({ ...session, metadata: { ...object(session.metadata), hook_pending: { id: pending.id, turn_id: string(input.payload.turn_id), ...(input.request_id_kind === "native" ? { tool_use_id: pending.id } : {}) } } as JsonValue }, { authority: harnessMode === "actionable" ? 80 : 40 });
+    if (session) this.registry.upsert({ ...session, ...(pending.read_only ? { read_only: true } : {}), metadata: { ...object(session.metadata), hook_pending: { id: pending.id, turn_id: string(input.payload.turn_id), ...(input.request_id_kind === "native" ? { tool_use_id: pending.id } : {}) } } as JsonValue }, { authority: harnessMode === "actionable" ? 80 : 40 });
     this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
     if (pending.type === "approval") this.registry.append(id, "permission_request", { approval_id: pending.id, tool_name: pending.tool_name, tool_input_summary: pending.tool_input_summary }, idempotency);
     if (mode !== "actionable" || claudeQuestionObservation) return { decision: "neutral" };
