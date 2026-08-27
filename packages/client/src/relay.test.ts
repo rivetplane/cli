@@ -124,14 +124,14 @@ test("coalesces the disconnected discovery queue instead of flooding the relay",
   wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
   const registry = new SessionRegistry();
-  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined, { replay_delay_ms: 60_000 });
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined, { replay_delay_ms: 60_000, session_drain_interval_ms: 1 });
   const now = new Date().toISOString();
   for (let index = 0; index < 300; index++) registry.upsert({ id: `startup-${index}`, machine_id: "m1", harness_type: "opencode", cwd: "/tmp", status: "completed", created_at: now, last_activity_at: new Date(Date.parse(now) + index).toISOString(), pending: null });
   registry.setPending("startup-0", { type: "question", id: "q-startup", session_id: "startup-0", prompt: "Choose", requested_at: now });
   try {
     relay.start(); await until(() => received.some((message) => message.type === "session.upsert" && (message.session as { pending?: { id?: string } }).pending?.id === "q-startup"));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.ok(received.filter((message) => message.type === "session.upsert").length <= 17);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.ok(received.filter((message) => message.type === "session.upsert").length <= 2);
     assert.equal(received.filter((message) => message.type === "transcript.append").length, 0);
   } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });

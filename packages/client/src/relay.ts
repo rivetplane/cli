@@ -87,6 +87,11 @@ export class OutboundRelay extends EventEmitter {
         } else if (message.type === "command.result" || message.type === "session.removed") essential.push(message);
       }
       for (const message of [...pending.values(), ...essential]) socket.send(JSON.stringify(message));
+      // Session changes discovered before the socket opened are already
+      // represented by the bounded snapshot and repair pass above. Draining
+      // thousands of stale startup records here creates an ordered server-side
+      // backlog that can delay a live Claude question for over a minute.
+      this.#sessionQueue.clear();
       this.#scheduleSessionDrain();
       // Repair transcript history after live state has had time to settle. One
       // frame per tick keeps new approvals and questions ahead of old events.
