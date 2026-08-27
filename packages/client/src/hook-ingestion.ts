@@ -232,13 +232,15 @@ export class HookIngestor {
         if (this.#waiters.get(key) !== waiter) return;
         if (claudePermission) {
           const current = this.registry.get(id);
-          if (current?.pending?.id === pending.id) this.registry.upsert({
-            ...current,
-            read_only: true,
-            pending: { ...current.pending, read_only: true },
-            metadata: { ...object(current.metadata), hook_response_expired_at: new Date().toISOString() } as JsonValue,
-          }, { authority: 80 });
-          this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
+          if (current?.pending?.id === pending.id) {
+            this.registry.upsert({
+              ...current,
+              read_only: true,
+              pending: { ...current.pending, read_only: true },
+              metadata: { ...object(current.metadata), hook_response_expired_at: new Date().toISOString() } as JsonValue,
+            }, { authority: 80 });
+            this.registry.setStatus(id, pending.type === "approval" ? "waiting_approval" : "waiting_input");
+          }
           this.#settle(id, pending.id, { decision: "neutral" }, false);
         } else this.#settle(id, pending.id, { decision: "neutral" }, true);
       }, waitMs);

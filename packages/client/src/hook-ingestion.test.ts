@@ -98,6 +98,18 @@ test("makes a timed-out Claude approval and its session read-only", async () => 
   assert.equal(hooks.target(envelope.session_id), undefined);
 });
 
+test("settles a Claude waiter safely after discovery removes its session", async () => {
+  const payload = await fixture<Record<string, unknown>>("claude-code", "permission-request.json");
+  const envelope = toHookEnvelope("claude-code", "PermissionRequest", payload);
+  const registry = new SessionRegistry(); const hooks = new HookIngestor("machine-1", registry, 20);
+  const result = hooks.ingest(envelope);
+  await eventually(() => registry.get(envelope.session_id)?.pending?.id === envelope.request_id);
+  registry.remove(envelope.session_id);
+  assert.deepEqual(await result, { decision: "neutral" });
+  assert.equal(registry.get(envelope.session_id), undefined);
+  assert.equal(hooks.target(envelope.session_id), undefined);
+});
+
 test("normalizes official OpenCode permission and multi-question event fixtures", async () => {
   const permission = await fixture<{ type: string; properties: Record<string, unknown> }>("opencode", "permission-asked.json");
   const permissionReplied = { type: "permission.replied", properties: { sessionID: "opencode-session-full", requestID: "permission-full", reply: "reject" } };

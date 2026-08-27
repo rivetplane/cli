@@ -17,6 +17,25 @@ test("parses supported rollout lines and ignores malformed or unknown schemas", 
   assert.deepEqual(parseCodexRolloutLine(lines.at(-1)!, "fallback"), {});
 });
 
+test("detects and resolves explicit escalated Codex custom tool approvals", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-approval-")); const sessions = join(root, "sessions"); const checkpoint = join(root, "checkpoint.json");
+  await mkdir(sessions, { recursive: true }); const path = join(sessions, "rollout-approval.jsonl");
+  const meta = { timestamp: "2026-08-27T03:16:40.000Z", type: "session_meta", payload: { id: "codex-approval", timestamp: "2026-08-27T03:16:40.000Z", cwd: "/tmp/repo", cli_version: "0.149.1", model_provider: "openai" } };
+  const request = { timestamp: "2026-08-27T03:16:47.000Z", type: "response_item", payload: { type: "custom_tool_call", call_id: "call-approval", name: "exec", input: 'const r = await tools.exec_command({ cmd: "open .", sandbox_permissions: "require_escalated", justification: "Open the workspace?" });' } };
+  await writeFile(path, `${JSON.stringify(meta)}\n${JSON.stringify(request)}\n`);
+  const registry = new SessionRegistry(); const discovery = new CodexRolloutDiscovery("machine-1", registry, { sessions_directory: sessions, checkpoint_path: checkpoint, scan_interval_ms: 1 });
+  try {
+    await discovery.poll(); const pending = registry.get("codex-approval")?.pending;
+    assert.equal(pending?.type, "approval"); assert.equal(pending?.id, "call-approval"); assert.equal(pending?.read_only, true);
+    assert.equal(registry.get("codex-approval")?.status, "waiting_approval"); assert.match(pending?.type === "approval" ? pending.tool_input_summary : "", /Open the workspace/);
+    assert.deepEqual(registry.transcript("codex-approval").map((event) => event.type), ["tool_call", "status_change", "permission_request"]);
+    const output = { timestamp: "2026-08-27T03:18:55.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call-approval", output: "aborted by user after 127.8s" } };
+    await writeFile(path, `${JSON.stringify(meta)}\n${JSON.stringify(request)}\n${JSON.stringify(output)}\n`); await discovery.poll();
+    assert.equal(registry.get("codex-approval")?.pending, null); assert.equal(registry.get("codex-approval")?.status, "completed");
+    assert.deepEqual(registry.transcript("codex-approval").map((event) => event.type), ["tool_call", "status_change", "permission_request", "tool_result", "status_change", "permission_response"]);
+  } finally { discovery.stop(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("discovers rollouts independent of cwd, deduplicates, checkpoints, and handles truncation", async () => {
   const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-rollout-")); const sessions = join(root, "sessions", "2026", "08", "25"); const checkpoint = join(root, "config", "checkpoint.json");
   await mkdir(sessions, { recursive: true }); const path = join(sessions, "rollout-test.jsonl"); const original = await readFile(fixture, "utf8"); await writeFile(path, original);
