@@ -7,7 +7,7 @@ import { HOOK_DISCOVERY_VERSION, HOOK_OWNER } from "./hook-discovery.js";
 export const HOOK_BRIDGE_VERSION = 1 as const;
 const BRIDGE_MARKER = `${HOOK_OWNER}:bridge-v${HOOK_BRIDGE_VERSION}`;
 
-export interface HookBridgeInstallation { node: string; bridge: string; command(harness: string, event: string): string }
+export interface HookBridgeInstallation { node: string; bridge: string; statusline: string; command(harness: string, event: string): string; statusLineCommand(original: unknown): string }
 
 export function defaultHookBridgePath(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
   const root = env.XDG_CONFIG_HOME || join(home, ".config");
@@ -17,9 +17,10 @@ export function defaultHookBridgePath(env: NodeJS.ProcessEnv = process.env, home
 export function hookBridgeInstallation(options: { env?: NodeJS.ProcessEnv; home?: string; node?: string; platform?: NodeJS.Platform } = {}): HookBridgeInstallation {
   const env = options.env ?? process.env;
   const bridge = defaultHookBridgePath(env, options.home ?? homedir());
+  const statusline = join(dirname(bridge), "claude-statusline.cjs");
   const node = options.node ?? process.execPath;
   const platform = options.platform ?? process.platform;
-  return { node, bridge, command: (harness, event) => [node, bridge, "--owner", HOOK_OWNER, "--harness", harness, "--event", event].map((value) => shellQuote(value, platform)).join(" ") };
+  return { node, bridge, statusline, command: (harness, event) => [node, bridge, "--owner", HOOK_OWNER, "--harness", harness, "--event", event].map((value) => shellQuote(value, platform)).join(" "), statusLineCommand: (original) => [node, statusline, Buffer.from(JSON.stringify(original ?? null)).toString("base64url")].map((value) => shellQuote(value, platform)).join(" ") };
 }
 
 export async function installHookBridge(options: { env?: NodeJS.ProcessEnv; home?: string; node?: string; platform?: NodeJS.Platform } = {}): Promise<HookBridgeInstallation> {
@@ -50,6 +51,7 @@ export async function installHookBridge(options: { env?: NodeJS.ProcessEnv; home
     await rename(temporary, installation.bridge);
   }
   if (process.platform !== "win32") await chmod(installation.bridge, 0o600);
+  await writeOwnedStatusLine(installation.statusline, durableClaudeStatusLineSource(installation));
   return installation;
 }
 
@@ -63,6 +65,17 @@ export async function uninstallHookBridge(options: { env?: NodeJS.ProcessEnv; ho
     if (!source.includes(BRIDGE_MARKER)) throw new Error("Refused to remove an unmarked hook bridge");
     await rm(path);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const statusline = join(dirname(path), "claude-statusline.cjs");
+  try { const source = await readFile(statusline, "utf8"); if (!source.includes(`${HOOK_OWNER}:claude-statusline-v1`)) throw new Error("Refused to remove an unmarked status-line wrapper"); await rm(statusline); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+}
+
+async function writeOwnedStatusLine(path: string, source: string): Promise<void> {
+  let prior: string | undefined; try { const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink()) throw new Error("Refused to replace a non-regular status-line wrapper"); assertCurrentUser(info, "Status-line wrapper"); prior = await readFile(path, "utf8"); if (!prior.includes(`${HOOK_OWNER}:claude-statusline-v1`)) throw new Error("Refused to overwrite an unmarked status-line wrapper"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (prior === source) return; const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`; await writeFile(temporary, source, { encoding: "utf8", mode: 0o600, flag: "wx" }); if (process.platform !== "win32") await chmod(temporary, 0o600); await rename(temporary, path);
+}
+
+function durableClaudeStatusLineSource(installation: HookBridgeInstallation): string {
+  return `// ${HOOK_OWNER}:claude-statusline-v1\n"use strict";\nconst { spawn } = require("node:child_process");\nconst original = JSON.parse(Buffer.from(process.argv[2] || "bnVsbA", "base64url").toString("utf8"));\nasync function read() { let value = ""; for await (const chunk of process.stdin) value += String(chunk); return value; }\nasync function main() { const input = await read(); const telemetry = spawn(${JSON.stringify(installation.node)}, [${JSON.stringify(installation.bridge)}, "--owner", ${JSON.stringify(HOOK_OWNER)}, "--harness", "claude-code", "--event", "StatusLine"], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true }); telemetry.stdin.end(input); telemetry.unref(); if (!original || original.type !== "command" || typeof original.command !== "string") return; const child = spawn(original.command, { shell: true, stdio: ["pipe", "pipe", "inherit"], windowsHide: true }); child.stdin.end(input); for await (const chunk of child.stdout) process.stdout.write(chunk); await new Promise((resolve) => child.once("close", resolve)); }\nmain().catch(() => {});\n`;
 }
 
 function shellQuote(value: string, platform: NodeJS.Platform): string {
@@ -76,6 +89,12 @@ function assertCurrentUser(info: { uid: number }, label: string): void {
   if (uid !== undefined && info.uid !== uid) throw new Error(`${label} is not owned by the current user`);
 }
 
-export function durableHookBridgeSource(): string {
+function durableHookBridgeSourceBase(): string {
   return `// ${BRIDGE_MARKER}\n"use strict";\nconst fs = require("node:fs/promises");\nconst os = require("node:os");\nconst path = require("node:path");\nconst crypto = require("node:crypto");\nconst OWNER = ${JSON.stringify(HOOK_OWNER)};\nconst VERSION = ${HOOK_DISCOVERY_VERSION};\nconst MAX_STDIN = 1000000;\nfunction flag(name) { const offset = process.argv.indexOf(name); return offset >= 0 ? process.argv[offset + 1] : undefined; }\nfunction object(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : {}; }\nfunction first(input, names) { for (const name of names) if (typeof input[name] === "string" && input[name]) return input[name]; }\nfunction endpoint(value) { const url = new URL(value); if (url.protocol !== "http:" || !["127.0.0.1", "[::1]", "::1"].includes(url.hostname) || url.pathname !== "/v1/hooks/events" || url.username || url.password || url.search || url.hash) throw new Error("invalid endpoint"); return url.toString(); }\nasync function input() { let raw = ""; for await (const chunk of process.stdin) { raw += String(chunk); if (raw.length > MAX_STDIN) throw new Error("input too large"); } return object(raw ? JSON.parse(raw) : {}); }\nasync function discovery() { const root = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"); const file = process.env.RIVETPLANE_HOOK_DISCOVERY || path.join(root, "harness-cp", "hook-endpoint.json"); const info = await fs.lstat(file); if (!info.isFile() || info.isSymbolicLink()) throw new Error("unsafe discovery"); if (typeof process.getuid === "function" && info.uid !== process.getuid()) throw new Error("wrong owner"); if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error("broad permissions"); const value = JSON.parse(await fs.readFile(file, "utf8")); if (value.version !== VERSION || value.owner !== OWNER || typeof value.token !== "string" || value.token.length < 32 || !Number.isSafeInteger(value.pid) || typeof value.started_at !== "string") throw new Error("invalid discovery"); try { process.kill(value.pid, 0); } catch (error) { if (error.code !== "EPERM") throw new Error("stale discovery"); } return { endpoint: endpoint(value.endpoint), token: value.token }; }\nfunction envelope(harness, configuredEvent, payload) { const session = first(payload, ["session_id", "sessionId", "sessionID", "thread-id", "thread_id", "threadId"]); if (!session) throw new Error("no session"); const event = first(payload, ["hook_event_name", "event", "type"]) || configuredEvent; const request = first(payload, ["request_id", "requestId", "requestID", "permission_request_id", "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"].concat(harness === "opencode" ? ["id"] : [])) || (harness === "claude-code" && event === "PermissionRequest" ? "rivetplane-" + crypto.randomUUID() : undefined); return { version: 1, harness, event, session_id: session, cwd: first(payload, ["cwd", "directory", "working_directory"]) || process.cwd(), transport: harness === "opencode" ? "opencode-plugin" : harness + "-hook-command", payload, ...(request ? { request_id: request } : {}) }; }\nfunction native(harness, event, payload, result) { if (!result || result.decision === "neutral") return {}; if (harness === "claude-code" && event === "PermissionRequest") return { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: result.decision === "deny" ? { behavior: "deny", message: "Denied through Rivetplane" } : { behavior: "allow", updatedInput: { ...object(payload.tool_input), ...object(result.updated_input) } } } }; return result; }\nasync function main() { const owner = flag("--owner"); const harness = flag("--harness"); const event = flag("--event"); if (owner !== OWNER) throw new Error("Hook ownership marker is invalid"); if (!harness || !event) throw new Error("--harness and --event are required"); try { if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return {}; const payload = await input(); const record = await discovery(); const actionable = (harness === "claude-code" && event === "PermissionRequest") || (harness === "opencode" && (event === "permission.asked" || event === "question.asked")); const configuredTimeout = Number(process.env.RIVETPLANE_HOOK_TIMEOUT_MS); const timeout = Number.isSafeInteger(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : actionable ? 125000 : 3000; const response = await fetch(record.endpoint, { method: "POST", headers: { "content-type": "application/json", "x-rivetplane-hook-owner": OWNER, "x-rivetplane-hook-token": record.token }, body: JSON.stringify(envelope(harness, event, payload)), signal: AbortSignal.timeout(timeout) }); if (!response.ok) return {}; return native(harness, event, payload, await response.json()); } catch { return {}; } }\nmain().then((value) => process.stdout.write(JSON.stringify(value) + "\\n")).catch((error) => { process.stderr.write("rivetplane hook bridge: " + error.message + "\\n"); process.exitCode = 1; });\n`;
+}
+
+export function durableHookBridgeSource(): string {
+  return durableHookBridgeSourceBase()
+    .replace("function native(harness, event, payload, result)", 'function usagePayload(payload) { return { session_id: first(payload, ["session_id", "sessionId"]), cwd: first(payload, ["cwd"]), hook_event_name: "StatusLine", model: payload.model, context_window: object(payload.context_window || payload.contextWindow), cost: object(payload.cost), rate_limits: object(payload.rate_limits || payload.rateLimits) }; }\nfunction native(harness, event, payload, result)')
+    .replace("const payload = await input(); const record = await discovery();", 'let payload = await input(); if (harness === "claude-code" && event === "StatusLine") payload = usagePayload(payload); const record = await discovery();');
 }

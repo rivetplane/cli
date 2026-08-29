@@ -10,6 +10,8 @@ import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
+import type { UsageCollector } from "./usage.js";
+import { openCodeMessageUsage } from "./opencode-manager.js";
 
 type RecordValue = Record<string, unknown>;
 
@@ -72,6 +74,7 @@ export interface OpenCodeExportDiscoveryOptions {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  usage?: UsageCollector;
 }
 
 function object(value: unknown): RecordValue | undefined {
@@ -567,6 +570,7 @@ export class OpenCodeExportDiscovery {
   #syncMessage(sessionId: string, info: RecordValue, parts: RecordValue[], checkpoint: SessionCheckpoint): void {
     const messageId = string(info.id) ?? stableId(sessionId, "message", JSON.stringify(info)); const role = info.role === "user" ? "user" : "assistant";
     const messageTs = timestamp(object(info.time)?.created);
+    const usage = openCodeMessageUsage(sessionId, info); if (usage) this.options.usage?.ingest({ ...usage, source: "opencode-cli:export" });
     for (const part of parts) {
       const partId = string(part.id) ?? stableId(messageId, JSON.stringify(part)); const key = `${messageId}/${partId}`; const prior = checkpoint.parts[key];
       if (part.type === "text" && typeof part.text === "string") {

@@ -5,6 +5,8 @@ import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import { normalizeApprovalInput } from "./pending-normalization.js";
+import type { UsageCollector } from "./usage.js";
+import { claudeStatusUsage } from "./claude-code-discovery.js";
 
 export const HOOK_PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_HOOK_WAIT_MS = 30 * 60_000;
@@ -57,7 +59,7 @@ const ACTIONABLE_EVENTS: Record<string, Set<string>> = {
   opencode: new Set(["permission.asked", "question.asked"]),
 };
 const VERIFIED_EVENTS: Record<string, Set<string>> = {
-  "claude-code": new Set(["PermissionRequest", "PreToolUse", "AskUserQuestion", "PostToolUse", "Stop", "SessionEnd"]),
+  "claude-code": new Set(["PermissionRequest", "PreToolUse", "AskUserQuestion", "PostToolUse", "Stop", "SessionEnd", "StatusLine"]),
   codex: new Set(["SessionStart", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionEnd"]),
   opencode: new Set(["session.created", "session.updated", "session.status", "session.idle", "session.deleted", "session.error", "permission.asked", "permission.replied", "question.asked", "question.replied", "question.rejected"]),
 };
@@ -139,10 +141,12 @@ export class HookIngestor {
   #cursors = new Map<string, number>();
   #harnesses = new Map<string, { cwd: string; transport: string; mode: HookActionMode }>();
   #authoritativeTarget: (harness: string, sessionId: string) => boolean = () => false;
+  #usage: UsageCollector | undefined;
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly wait_ms = DEFAULT_HOOK_WAIT_MS, private readonly confirmation_wait_ms = DEFAULT_NATIVE_CONFIRMATION_WAIT_MS) {}
 
   target(id: string): CommandTarget | undefined { return this.#targets.has(id) ? new HookTarget(this, id) : undefined; }
   setAuthoritativeTarget(check: (harness: string, sessionId: string) => boolean): void { this.#authoritativeTarget = check; }
+  setUsage(usage: UsageCollector): void { this.#usage = usage; }
   harnesses(): Array<{ harness_type: string; discovered_sessions: number; attached_sessions: number; discovered_session_ids: string[]; attached_session_ids: string[] }> {
     return [...this.#harnesses.keys()].map((harness_type) => {
       const ids = this.registry.list().filter((session) => session.harness_type === harness_type && session.metadata && object(session.metadata).transport === this.#harnesses.get(harness_type)?.transport).map((session) => session.id);
@@ -168,6 +172,9 @@ export class HookIngestor {
     let input = validateHookEnvelope(raw);
     if (input.harness === "codex" && input.event === "PermissionRequest" && !input.request_id) input = withCodexTelemetryIdentity(input);
     validateVerifiedPayload(input);
+    if (input.harness === "claude-code" && input.event === "StatusLine") {
+      const model = string(input.payload.model) ?? string(object(input.payload.model).id); const usage = claudeStatusUsage(input.session_id, input.payload, model); if (usage) this.#usage?.ingest(usage);
+    }
     const claudePermission = input.harness === "claude-code" && input.event === "PermissionRequest";
     const claudeQuestionPermission = isClaudeQuestionPermission(input);
     const claudeQuestionObservation = input.harness === "claude-code" && input.event === "PreToolUse" && string(input.payload.tool_name) === "AskUserQuestion";
@@ -363,6 +370,10 @@ function validateVerifiedPayload(input: NativeHookEnvelope): void {
   if (!VERIFIED_EVENTS[input.harness]?.has(input.event)) throw new Error(`Harness hook interface is unsupported: ${input.harness}/${input.event}`);
   if (input.harness === "claude-code") {
     if (input.transport !== "claude-code-hook-command") throw new Error("Claude hook transport is invalid");
+    if (input.event === "StatusLine") {
+      if (input.payload.session_id !== input.session_id || input.payload.cwd !== input.cwd) throw new Error("Claude status-line identity does not match its official payload");
+      return;
+    }
     if (input.payload.session_id !== input.session_id || input.payload.cwd !== input.cwd || input.payload.hook_event_name !== input.event) throw new Error("Claude hook identity does not match its official payload");
     if (/^(PreToolUse|PostToolUse|PermissionRequest)$/.test(input.event) && (!string(input.payload.tool_name) || !input.payload.tool_input || typeof input.payload.tool_input !== "object")) throw new Error("Claude tool hook payload is invalid");
     if (/^(PreToolUse|PostToolUse)$/.test(input.event) && string(input.payload.tool_use_id) !== input.request_id) throw new Error("Claude tool-use ID does not match");

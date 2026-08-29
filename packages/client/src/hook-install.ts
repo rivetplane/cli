@@ -113,10 +113,31 @@ async function jsonConfig(action: "install" | "uninstall", path: string, definit
     if (filtered.length) hooksRoot[event] = filtered; else delete hooksRoot[event];
   }
   if (definition.format === "nested-json") root.hooks = hooksRoot;
+  if (definition.harness === "claude-code") { await claudeStatusLine(action, root, bridge); changed = true; }
   if (definition.harness === "codex" && action === "install" && root.description === undefined) root.description = `Rivetplane standalone telemetry hooks (${HOOK_OWNER})`;
   if (!changed) return action === "install" ? (existed ? "updated" : "installed") : "removed";
   if (definition.harness === "codex" && action === "uninstall" && root.description === `Rivetplane standalone telemetry hooks (${HOOK_OWNER})` && Object.keys(hooksRoot).length === 0 && Object.keys(root).every((key) => key === "description" || key === "hooks")) { await rm(path); return "removed"; }
   await atomicJson(path, root); return action === "install" ? (existed ? "updated" : "installed") : "removed";
+}
+
+async function claudeStatusLine(action: "install" | "uninstall", root: Record<string, unknown>, bridge: HookBridgeInstallation): Promise<void> {
+  const backupPath = `${bridge.statusline}.backup.json`; const current = object(root.statusLine); const owned = typeof current.command === "string" && current.command.includes(bridge.statusline);
+  if (action === "install") {
+    let original: unknown = root.statusLine ?? null;
+    if (owned) {
+      try { const backup = object(JSON.parse(await readFile(backupPath, "utf8"))); if (backup.owner === HOOK_OWNER) original = backup.original; } catch { original = null; }
+    } else {
+      await mkdir(dirname(backupPath), { recursive: true, mode: 0o700 });
+      await writeFile(backupPath, `${JSON.stringify({ owner: HOOK_OWNER, original: root.statusLine ?? null })}\n`, { mode: 0o600 });
+    }
+    root.statusLine = { ...object(original), type: "command", command: bridge.statusLineCommand(original) };
+    return;
+  }
+  if (!owned) { await rm(backupPath, { force: true }); return; }
+  let original: unknown = null;
+  try { const backup = object(JSON.parse(await readFile(backupPath, "utf8"))); if (backup.owner !== HOOK_OWNER) throw new Error("Status-line backup owner is invalid"); original = backup.original; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (original === null || original === undefined) delete root.statusLine; else root.statusLine = original;
+  await rm(backupPath, { force: true });
 }
 
 async function ownedFile(action: "install" | "uninstall", path: string, source: string): Promise<"installed" | "updated" | "removed"> {
@@ -132,14 +153,15 @@ async function ownedFile(action: "install" | "uninstall", path: string, source: 
 }
 
 function extensionSource(definition: HarnessHookDefinition, bridge: HookBridgeInstallation): string {
-  if (definition.harness === "opencode") return openCodePluginSource(bridge);
+  if (definition.harness === "opencode") return openCodePluginSource(definition, bridge);
   throw new Error(`No verified extension generator for ${definition.harness}`);
 }
 
-function openCodePluginSource(bridge: HookBridgeInstallation): string {
+function openCodePluginSource(definition: HarnessHookDefinition, bridge: HookBridgeInstallation): string {
   return `// ${HOOK_OWNER}
 // Generated from https://opencode.ai/docs/plugins/ and the official SDK event types.
 export const Rivetplane = async (ctx) => {
+  const supportedEvents = new Set(${JSON.stringify(definition.events)});
   const rawPost = async (url, requestID, body) => {
     const raw = ctx?.client?._client || ctx?.client?.client;
     if (!raw || typeof raw.post !== "function") return false;
@@ -161,6 +183,7 @@ export const Rivetplane = async (ctx) => {
   return ({
   event: async ({ event }) => {
     if (process.env.RIVETPLANE_HOOKS_DISABLED === "1") return;
+    if (!supportedEvents.has(event?.type)) return;
     const props = event?.properties || {};
     const session_id = props.sessionID || props.info?.id;
     if (!session_id) return;

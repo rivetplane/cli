@@ -3,6 +3,7 @@ import { SessionDiscovery } from "./discovery.js";
 import { ACPAttach } from "./acp-attach.js";
 import { SessionRegistry } from "./registry.js";
 import type { CapabilitySupport } from "@rivetplane/shared/protocol";
+import type { UsageCollector } from "./usage.js";
 
 interface Managed { signature: string; attach: ACPAttach }
 export interface HarnessDiscoveryStatus {
@@ -37,7 +38,7 @@ export class SessionManager {
   #descriptors = new Map<string, AcpSessionDescriptor>();
   #reconcile = Promise.resolve();
 
-  constructor(readonly machine_id: string, options: { directory?: string; interval_ms?: number } = {}) {
+  constructor(readonly machine_id: string, private readonly options: { directory?: string; interval_ms?: number; usage?: UsageCollector } = {}) {
     this.registry = new SessionRegistry();
     this.discovery = new SessionDiscovery(options);
     this.discovery.on("sessions", (descriptors: AcpSessionDescriptor[]) => {
@@ -78,7 +79,7 @@ export class SessionManager {
     if (this.#connecting.has(descriptor.session_id)) return;
     current?.attach.close(); this.#sessions.delete(descriptor.session_id);
     this.#connecting.add(descriptor.session_id);
-    const attach = new ACPAttach(descriptor, this.registry, this.machine_id);
+    const attach = new ACPAttach(descriptor, this.registry, this.machine_id, this.options.usage);
     try {
       await attach.connect();
       this.#sessions.set(descriptor.session_id, { signature, attach });

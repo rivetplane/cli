@@ -12,6 +12,7 @@ import { ClaudeCodeDiscovery } from "./claude-code-discovery.js";
 import { HookIngestor } from "./hook-ingestion.js";
 import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
+import { UsageCollector } from "./usage.js";
 
 export interface ClientOptions {
   credentials?: Credentials;
@@ -43,6 +44,7 @@ export interface ClientOptions {
   claude_executable?: string;
   claude_config_dir?: string;
   claude_checkpoint_path?: string;
+  usage_checkpoint_path?: string;
 }
 
 export class HarnessControlClient {
@@ -55,15 +57,19 @@ export class HarnessControlClient {
   readonly codex_app_server?: CodexAppServerManager;
   readonly claude_code?: ClaudeCodeDiscovery;
   readonly hooks: HookIngestor;
+  readonly usage: UsageCollector;
 
   constructor(private readonly options: ClientOptions = {}) {
     const machineId = options.credentials?.machine_id ?? `local-${randomUUID()}`;
-    this.manager = new SessionManager(machineId, { ...(options.discovery_directory ? { directory: options.discovery_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
+    this.usage = new UsageCollector(machineId, { ...(options.usage_checkpoint_path ? { checkpoint_path: options.usage_checkpoint_path } : {}) });
+    this.manager = new SessionManager(machineId, { usage: this.usage, ...(options.discovery_directory ? { directory: options.discovery_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
     this.hooks = new HookIngestor(machineId, this.manager.registry);
-    if (typeof options.opencode_url === "string" || options.opencode_managed) this.opencode = new OpenCodeManager(machineId, this.manager.registry, { ...(typeof options.opencode_url === "string" ? { url: options.opencode_url } : {}), ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
+    this.hooks.setUsage(this.usage);
+    if (typeof options.opencode_url === "string" || options.opencode_managed) this.opencode = new OpenCodeManager(machineId, this.manager.registry, { usage: this.usage, ...(typeof options.opencode_url === "string" ? { url: options.opencode_url } : {}), ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}) });
     this.hooks.setAuthoritativeTarget((harness, id) => harness === "opencode" && Boolean(this.opencode?.target(id)) || harness === "codex" && Boolean(this.codex_app_server?.target(id)));
     const exportEnabled = options.opencode_export ?? (!options.opencode_managed && typeof options.opencode_url !== "string");
     if (options.opencode_url !== false && exportEnabled) this.opencode_exports = new OpenCodeExportDiscovery(machineId, this.manager.registry, {
+      usage: this.usage,
       ...(options.opencode_directory ? { directory: options.opencode_directory } : {}), ...(options.opencode_executable ? { executable: options.opencode_executable } : {}),
       ...(options.opencode_checkpoint_path ? { checkpoint_path: options.opencode_checkpoint_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
       ...(options.opencode_max_sessions_per_project ? { max_sessions_per_project: options.opencode_max_sessions_per_project } : {}),
@@ -76,11 +82,13 @@ export class HarnessControlClient {
       ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });
     if (options.codex_managed || options.codex_endpoint) this.codex_app_server = new CodexAppServerManager(machineId, this.manager.registry, {
+      usage: this.usage,
       managed: options.codex_managed ?? false, ...(options.codex_endpoint ? { endpoint: options.codex_endpoint } : {}), ...(options.codex_token ? { token: options.codex_token } : {}),
       ...(options.codex_directory ? { directory: options.codex_directory } : {}), ...(options.codex_executable ? { executable: options.codex_executable } : {}),
       ...(options.codex_socket_path ? { socket_path: options.codex_socket_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });
     if (options.claude_code !== false) this.claude_code = new ClaudeCodeDiscovery(machineId, this.manager.registry, {
+      usage: this.usage,
       ...(options.claude_executable ? { executable: options.claude_executable } : {}), ...(options.claude_config_dir ? { config_dir: options.claude_config_dir } : {}),
       ...(options.claude_checkpoint_path ? { checkpoint_path: options.claude_checkpoint_path } : {}), ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });
@@ -107,13 +115,14 @@ export class HarnessControlClient {
         throw new Error("Harness cannot create sessions");
       },
       capabilities: () => this.capabilityReports(),
+      usage: this.usage,
     });
     this.relay?.on("warning", (error) => this.manager.registry.emit("warning", error));
     this.manager.registry.on("warning", (error) => this.manager.registry.emit("log", `Warning: ${error instanceof Error ? error.message : String(error)}`));
   }
 
-  async start(): Promise<{ local_port: number }> { const local_port = await this.local_api.start(); await Promise.all([this.manager.start(), this.opencode?.start(), this.opencode_exports?.start(), this.claude_code?.start(), this.codex_rollouts?.start(), this.codex_app_server?.start()]); this.relay?.start(); return { local_port }; }
-  async stop(): Promise<void> { this.relay?.stop(); this.opencode?.stop(); this.opencode_exports?.stop(); this.claude_code?.stop(); this.codex_rollouts?.stop(); await this.codex_app_server?.stop(); this.manager.stop(); await this.local_api.stop(); }
+  async start(): Promise<{ local_port: number }> { await this.usage.start(); const local_port = await this.local_api.start(); await Promise.all([this.manager.start(), this.opencode?.start(), this.opencode_exports?.start(), this.claude_code?.start(), this.codex_rollouts?.start(), this.codex_app_server?.start()]); this.relay?.start(); return { local_port }; }
+  async stop(): Promise<void> { this.relay?.stop(); this.opencode?.stop(); this.opencode_exports?.stop(); this.claude_code?.stop(); this.codex_rollouts?.stop(); await this.codex_app_server?.stop(); this.manager.stop(); await this.local_api.stop(); await this.usage.flush(); }
   capabilityReports(): HarnessCapabilities[] {
     return preferCapabilities([
       this.opencode?.capabilities(), this.codex_app_server?.capabilities(), ...this.hooks.capabilities(),

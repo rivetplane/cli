@@ -5,6 +5,7 @@ import type {
   Session,
   Timestamp,
   TranscriptEvent,
+  UsageSample,
 } from "./model.js";
 
 export interface HarnessModel {
@@ -85,6 +86,7 @@ export interface CommandResultMessage {
 }
 
 export interface HarnessCapabilitiesMessage { type: "harness.capabilities"; capabilities: HarnessCapabilities; }
+export interface UsageSampleMessage { type: "usage.sample"; sample: UsageSample; }
 
 export type ClientToServerMessage =
   | MachineHelloMessage
@@ -93,6 +95,7 @@ export type ClientToServerMessage =
   | TranscriptAppendMessage
   | SessionRemovedMessage
   | HarnessCapabilitiesMessage
+  | UsageSampleMessage
   | CommandResultMessage;
 
 interface CommandBase {

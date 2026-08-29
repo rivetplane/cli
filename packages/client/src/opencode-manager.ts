@@ -7,6 +7,7 @@ import type { CreateSessionCommand, HarnessCapabilities } from "@rivetplane/shar
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
+import type { RawUsageSample, UsageCollector } from "./usage.js";
 
 type SdkResult<T> = { data?: T; error?: unknown };
 
@@ -53,6 +54,23 @@ export interface OpenCodeManagerOptions {
   client?: OpencodeClient;
   server_factory?: typeof createOpencodeServer;
   port_factory?: () => Promise<number>;
+  usage?: UsageCollector;
+}
+
+type ObjectValue = Record<string, unknown>;
+function objectValue(value: unknown): ObjectValue | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : undefined; }
+function finiteNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined; }
+function stringValue(value: unknown): string | undefined { return typeof value === "string" && value ? value : undefined; }
+
+export function openCodeMessageUsage(sessionId: string, raw: unknown, contextWindow?: number): RawUsageSample | undefined {
+  const info = objectValue(raw); const messageId = stringValue(info?.id); const usage = objectValue(info?.tokens); if (!info || !messageId || !usage) return undefined;
+  const cache = objectValue(usage.cache); const input = finiteNumber(usage.input); const output = finiteNumber(usage.output); const reasoning = finiteNumber(usage.reasoning);
+  const cacheRead = finiteNumber(cache?.read ?? usage.cacheRead); const cacheWrite = finiteNumber(cache?.write ?? usage.cacheWrite);
+  const values = [input, output, reasoning, cacheRead, cacheWrite]; const total = values.some((value) => value !== undefined) ? values.reduce<number>((sum, value) => sum + (value ?? 0), 0) : undefined;
+  const model = objectValue(info.model); const provider = stringValue(info.providerID ?? model?.providerID); const modelId = stringValue(info.modelID ?? model?.modelID ?? model?.id); const cost = finiteNumber(info.cost);
+  const time = objectValue(info.time); const created = finiteNumber(time?.completed ?? time?.created);
+  return { session_id: sessionId, ...(created !== undefined ? { timestamp: new Date(created).toISOString() } : {}), harness: "opencode", ...(provider ? { provider } : {}), ...(modelId ? { model: modelId } : {}), source: "opencode-sdk:message", source_event_id: messageId,
+    source_counter_mode: "incremental", tokens: { input, output, reasoning, cache_read: cacheRead, cache_write: cacheWrite, total }, ...(contextWindow !== undefined ? { context: { window_size: contextWindow } } : {}), cost: cost !== undefined ? { status: "reported", amount: cost, currency: "USD" } : { status: "unavailable" } };
 }
 
 export class OpenCodeManager {
@@ -264,7 +282,12 @@ export class OpenCodeManager {
     }, { authority: 100 });
     if (first) this.registry.emit("log", `Harness attached: opencode (${session.id})`);
     const messages = unwrap(await this.#requireClient().session.messages({ sessionID: session.id, directory: session.directory }), `messages for ${session.id}`);
-    for (const message of messages) this.#syncParts(session.id, message.info.role, message.parts);
+    for (const message of messages) {
+      const info = message.info as unknown; const parsed = objectValue(info); const model = objectValue(parsed?.model); const provider = stringValue(parsed?.providerID ?? model?.providerID); const modelId = stringValue(parsed?.modelID ?? model?.modelID ?? model?.id);
+      const window = this.#capabilities?.models.find((entry) => entry.provider_id === provider && entry.model_id === modelId)?.context_limit;
+      const usage = openCodeMessageUsage(session.id, info, window); if (usage) this.options.usage?.ingest(usage);
+      this.#syncParts(session.id, message.info.role, message.parts);
+    }
   }
 
   #syncParts(sessionId: string, role: "user" | "assistant", parts: Part[]): void {

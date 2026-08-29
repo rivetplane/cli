@@ -113,6 +113,60 @@ export interface Session {
   metadata?: JsonValue;
 }
 
+export type UsageCounterMode = "incremental" | "cumulative";
+export type UsageCostStatus = "reported" | "estimated" | "unavailable";
+
+/** Null means that the harness did not report this token class. */
+export interface UsageTokens {
+  input: number | null;
+  output: number | null;
+  reasoning: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  total: number | null;
+}
+
+export interface UsageContext {
+  window_size: number;
+  used_tokens?: number;
+}
+
+export interface UsageCost {
+  status: UsageCostStatus;
+  amount?: number;
+  currency?: string;
+}
+
+export interface UsageQuotaWindow {
+  name: string;
+  used_percent?: number;
+  remaining?: number;
+  limit?: number;
+  resets_at?: Timestamp;
+}
+
+/**
+ * One append-only, idempotent AI usage event. Token and cost values are always
+ * incremental. source_counter_mode records the shape used by the harness.
+ * session_id is null only for account-level reports.
+ */
+export interface UsageSample {
+  event_id: string;
+  machine_id: string;
+  session_id: string | null;
+  turn_id?: string;
+  timestamp: Timestamp;
+  harness: string;
+  provider?: string;
+  model?: string;
+  source: string;
+  source_counter_mode: UsageCounterMode;
+  tokens: UsageTokens;
+  context?: UsageContext;
+  cost: UsageCost;
+  quota?: UsageQuotaWindow[];
+}
+
 export interface UserMessagePayload {
   text: string;
 }
