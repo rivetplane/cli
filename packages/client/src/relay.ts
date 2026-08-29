@@ -49,6 +49,7 @@ export class OutboundRelay extends EventEmitter {
   #sessionDrain: NodeJS.Timeout | undefined;
   #externalToLocal = new Map<string, string>();
   #capabilityFingerprints = new Map<string, string>();
+  #pendingUsage = new Map<string, UsageSample[]>();
 
   constructor(private readonly credentials: Credentials, private readonly registry: SessionRegistry, private readonly target: (id: string) => CommandTarget | undefined, private readonly options: RelayOptions = {}) {
     super();
@@ -65,9 +66,9 @@ export class OutboundRelay extends EventEmitter {
     });
     registry.on("removed", (session_id: string) => {
       const external = [...this.#externalToLocal].find(([, local]) => local === session_id)?.[0] ?? session_id;
-      this.send({ type: "session.removed", session_id: external, removed_at: new Date().toISOString() }); this.#externalToLocal.delete(external);
+      this.send({ type: "session.removed", session_id: external, removed_at: new Date().toISOString() }); this.#externalToLocal.delete(external); this.#pendingUsage.delete(session_id);
     });
-    options.usage?.on("usage", (sample: UsageSample) => this.send({ type: "usage.sample", sample: this.#namespaceUsage(sample) }));
+    options.usage?.on("usage", (sample: UsageSample) => this.#sendUsage(sample));
   }
 
   start(): void { if (!this.#stopped) return; this.#stopped = false; this.#connect(); }
@@ -96,10 +97,12 @@ export class OutboundRelay extends EventEmitter {
       // already cover it, while flooding it can delay a new question by minutes.
       // Preserve every pending item plus control results/removals that cannot be
       // reconstructed from the registry.
+      const queued = this.#queue.splice(0);
+      const requiredSessions = new Set(queued.filter((message) => message.type === "usage.sample" && message.sample.session_id).map((message) => message.type === "usage.sample" ? message.sample.session_id : null));
       const pending = new Map<string, ClientToServerMessage>(); const essential: ClientToServerMessage[] = [];
-      for (const message of this.#queue.splice(0)) {
+      for (const message of queued) {
         if (message.type === "session.upsert") {
-          if (message.session.pending) pending.set(message.session.id, message);
+          if (message.session.pending || requiredSessions.has(message.session.id)) pending.set(message.session.id, message);
         } else if (message.type === "command.result" || message.type === "session.removed" || message.type === "usage.sample") essential.push(message);
       }
       for (const message of [...pending.values(), ...essential]) socket.send(JSON.stringify(message));
@@ -137,6 +140,13 @@ export class OutboundRelay extends EventEmitter {
 
   #sendSession(session: Session): void {
     const id = this.#externalId(session);
+    const usage = this.#pendingUsage.get(session.id);
+    if (usage?.length) {
+      this.#pendingUsage.delete(session.id); this.#sessionQueue.delete(id);
+      this.send({ type: "session.upsert", session: this.#namespace(session) });
+      for (const sample of usage) this.send({ type: "usage.sample", sample: { ...sample, session_id: id } });
+      return;
+    }
     if (session.pending) {
       // Pending interactions are latency-sensitive. Remove any older ordinary
       // snapshot for this session and put the actionable state straight onto
@@ -232,9 +242,17 @@ export class OutboundRelay extends EventEmitter {
     const id = this.#externalId(session);
     return { ...session, id, pending: session.pending ? { ...session.pending, session_id: id } : null };
   }
-  #namespaceUsage(sample: UsageSample): UsageSample {
-    if (!sample.session_id) return sample;
+  #sendUsage(sample: UsageSample): void {
+    if (!sample.session_id) { this.send({ type: "usage.sample", sample }); return; }
     const session = this.registry.get(sample.session_id);
-    return session ? { ...sample, session_id: this.#externalId(session) } : sample;
+    if (!session) {
+      const pending = this.#pendingUsage.get(sample.session_id) ?? [];
+      pending.push(sample); if (pending.length > 100) pending.shift(); this.#pendingUsage.set(sample.session_id, pending); return;
+    }
+    const session_id = this.#externalId(session);
+    // Session validation happens before usage storage. Keep these frames next
+    // to each other so a new or reconnected server always sees the session first.
+    this.send({ type: "session.upsert", session: this.#namespace(session) });
+    this.send({ type: "usage.sample", sample: { ...sample, session_id } });
   }
 }
