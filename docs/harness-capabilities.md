@@ -29,7 +29,7 @@ Usage support is additive. Older harness and ACP versions continue to work and c
 | Harness | Usage source | Limits |
 |---|---|---|
 | ACP | `session/update` `usage_update` | Context `used`/`size` is not counted as tokens. Cost is cumulative. |
-| Codex | `thread/tokenUsage/updated`; optional account token-usage and rate-limit methods | Checked with Codex CLI 0.149.1. Account methods are version-dependent. Credit cost is estimated, not currency billing. |
+| Codex | `thread/tokenUsage/updated`; optional `account/usage/read`, `account/rateLimits/read`, and `account/rateLimits/updated` | Checked with Codex CLI 0.149.1 generated bindings. Account methods are version-dependent. Account lifetime tokens are not added to thread totals. Credit cost is estimated, not currency billing. |
 | Claude Code | Existing session JSONL plus an owned status-line tee installed with Claude hooks | The tee preserves and restores an existing status-line command. It forwards usage fields only. Context, cost, and rate limits are version-dependent. Cost is estimated. |
 | OpenCode | Native assistant message fields through HTTP/SSE or CLI export | Message cost is harness-reported. Model context needs provider-roster data. |
 
