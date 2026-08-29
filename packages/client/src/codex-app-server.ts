@@ -12,6 +12,8 @@ import type { CommandTarget } from "./relay.js";
 import { normalizeApprovalInput } from "./pending-normalization.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
+import type { RawUsageSample, UsageCollector } from "./usage.js";
+import type { UsageQuotaWindow } from "@rivetplane/shared/model";
 
 type RpcId = number | string;
 type RecordValue = Record<string, unknown>;
@@ -38,11 +40,54 @@ export interface CodexAppServerOptions {
   now?: () => number;
   spawn_process?: typeof spawn;
   platform?: NodeJS.Platform;
+  usage?: UsageCollector;
+}
+
+export function codexThreadUsage(params: RecordValue, model?: string): RawUsageSample | undefined {
+  const threadId = string(params.threadId); const turnId = string(params.turnId); const usage = object(params.tokenUsage); const total = object(usage?.total);
+  if (!threadId || !usage || !total) return undefined;
+  const input = number(total.inputTokens); const output = number(total.outputTokens); const reasoning = number(total.reasoningOutputTokens);
+  const cache = number(total.cachedInputTokens); const cacheWrite = number(total.cacheWriteInputTokens); const all = number(total.totalTokens); const window = number(usage.modelContextWindow);
+  return {
+    session_id: threadId, ...(turnId ? { turn_id: turnId } : {}), harness: "codex", provider: "openai", ...(model ? { model } : {}),
+    source: "codex-app-server:thread/tokenUsage/updated", source_counter_mode: "cumulative", counter_key: `codex:thread:${threadId}`,
+    tokens: { input, output, reasoning, cache_read: cache, cache_write: cacheWrite, total: all },
+    ...(window !== undefined ? { context: { window_size: window, ...(all !== undefined ? { used_tokens: all } : {}) } } : {}), cost: { status: "unavailable" },
+  };
+}
+
+export function codexRateLimits(value: RecordValue): UsageQuotaWindow[] {
+  const roots: Array<{ prefix: string; value: RecordValue }> = []; const legacy = object(value.rateLimits) ?? value;
+  roots.push({ prefix: string(legacy.limitName) ?? string(legacy.limitId) ?? "", value: legacy });
+  const byId = object(value.rateLimitsByLimitId); if (byId) for (const [id, item] of Object.entries(byId)) { const parsed = object(item); if (parsed && parsed !== legacy) roots.push({ prefix: string(parsed.limitName) ?? id, value: parsed }); }
+  const result: UsageQuotaWindow[] = [];
+  for (const root of roots) {
+    for (const name of ["primary", "secondary"] as const) {
+      const item = object(root.value[name]); if (!item) continue; const used = number(item.usedPercent); const reset = number(item.resetsAt);
+      result.push({ name: root.prefix ? `${root.prefix}:${name}` : name, ...(used !== undefined ? { used_percent: used } : {}), ...(reset !== undefined ? { resets_at: new Date(reset * 1_000).toISOString() } : {}) });
+    }
+    const credits = object(root.value.credits); const balance = numeric(credits?.balance);
+    if (credits && (balance !== undefined || credits.unlimited === true)) result.push({ name: root.prefix ? `${root.prefix}:credits` : "credits", ...(balance !== undefined ? { remaining: balance } : {}) });
+    const spend = object(root.value.individualLimit); const limit = numeric(spend?.limit); const used = numeric(spend?.used); const reset = number(spend?.resetsAt);
+    if (spend) result.push({ name: root.prefix ? `${root.prefix}:spend` : "spend", ...(limit !== undefined ? { limit } : {}), ...(limit !== undefined && used !== undefined ? { remaining: Math.max(0, limit - used) } : {}), ...(reset !== undefined ? { resets_at: new Date(reset * 1_000).toISOString() } : {}) });
+  }
+  return result;
+}
+
+export function codexAccountUsage(value: RecordValue): RawUsageSample | undefined {
+  const thread = object(value.threadUsage); const groups = array(thread?.groups).map(object).filter((item): item is RecordValue => Boolean(item)); const sessionId = string(thread?.threadId) ?? null;
+  // account/usage/read overlaps thread/tokenUsage/updated. Use it only for
+  // estimated cost so additive token totals cannot count a turn twice.
+  const usd = numeric(thread?.estimatedUsageUsdMicros); const credits = numeric(thread?.estimatedUsageCreditsMicros); const models = [...new Set(groups.flatMap((group) => string(group.model) ? [string(group.model)!] : []))];
+  if (usd === undefined && credits === undefined) return undefined;
+  return { session_id: sessionId, harness: "codex", provider: "openai", ...(models.length === 1 ? { model: models[0]! } : {}), source: "codex-app-server:account/usage/read", source_counter_mode: "cumulative", counter_key: `codex:account-usage:${sessionId ?? "account"}`,
+    tokens: {}, cost: usd !== undefined ? { status: "estimated", amount: usd / 1_000_000, currency: "USD" } : credits !== undefined ? { status: "estimated", amount: credits / 1_000_000, currency: "CREDITS" } : { status: "unavailable" } };
 }
 
 function object(value: unknown): RecordValue | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined; }
 function string(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
 function number(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
+function numeric(value: unknown): number | undefined { const parsed = typeof value === "string" && value.trim() ? Number(value) : value; return typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined; }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function isoSeconds(value: unknown): string { return new Date((number(value) ?? Date.now() / 1_000) * 1_000).toISOString(); }
 function summary(value: unknown, limit = 2_000): string { const text = typeof value === "string" ? value : JSON.stringify(value) ?? ""; return text.length <= limit ? text : `${text.slice(0, limit - 3)}...`; }
@@ -104,6 +149,7 @@ export class CodexAppServerManager {
   #default_model: string | undefined;
   #pollFailures = 0;
   #nextPollAt = 0;
+  #accountUsageAt = 0;
   #stopped = false;
 
   constructor(readonly machine_id: string, readonly registry: SessionRegistry, private readonly options: CodexAppServerOptions = {}) {
@@ -147,6 +193,7 @@ export class CodexAppServerManager {
       if (this.options.managed && (!this.#child || this.#child.exitCode !== null)) await this.#launch();
       if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) await this.#connect();
       await this.#listThreads();
+      if (now - this.#accountUsageAt >= 60_000) { await this.#accountUsage(); this.#accountUsageAt = now; }
       this.#pollFailures = 0; this.#nextPollAt = 0;
     } catch (error) {
       this.#online = false; this.#operations.live_attachment = false;
@@ -320,6 +367,13 @@ export class CodexAppServerManager {
   #notification(method: string, params: RecordValue): void {
     // This official process-level notification has no session state for Rivetplane.
     if (method === "remoteControl/status/changed") return;
+    if (method === "thread/tokenUsage/updated") {
+      const threadId = string(params.threadId); const model = threadId ? this.registry.get(threadId)?.model?.model_id : undefined;
+      const sample = codexThreadUsage(params, model); if (sample) this.options.usage?.ingest(sample); return;
+    }
+    if (method === "account/rateLimits/updated") {
+      const quota = codexRateLimits(params); if (quota.length) this.options.usage?.ingest({ session_id: null, harness: "codex", provider: "openai", source: "codex-app-server:account/rateLimits/updated", source_counter_mode: "cumulative", counter_key: "codex:account:rate-limits", tokens: {}, cost: { status: "unavailable" }, quota }); return;
+    }
     const threadId = string(params.threadId); if (method === "turn/started" && threadId) { const turn = object(params.turn); const state = this.#threads.get(threadId); if (state) state.turn_id = string(turn?.id); if (this.registry.get(threadId)) this.registry.setStatus(threadId, "running"); return; }
     if (method === "turn/completed" && threadId) { const turn = object(params.turn); const state = this.#threads.get(threadId); if (state) state.turn_id = undefined; if (this.registry.get(threadId)) this.registry.setStatus(threadId, string(turn?.status) === "failed" ? "error" : "waiting_input"); return; }
     if ((method === "item/completed" || method === "item/started") && threadId) { const item = object(params.item); if (item) this.#syncItem(threadId, item, number(params.completedAtMs ?? params.startedAtMs)); return; }
@@ -336,6 +390,12 @@ export class CodexAppServerManager {
       const tool = type ?? "tool"; this.registry.append(threadId, "tool_call", { tool_call_id: id, tool_name: tool, input_summary: summary(item.command ?? item.arguments ?? item.changes) }, { id: `codex-item-${id}-call`, ts });
       if (["completed", "failed", "declined"].includes(string(item.status) ?? "")) this.registry.append(threadId, "tool_result", { tool_call_id: id, output_summary: summary(item.aggregatedOutput ?? item.result ?? item.error), is_error: string(item.status) !== "completed" }, { id: `codex-item-${id}-result`, ts });
     }
+  }
+
+  async #accountUsage(): Promise<void> {
+    try { const response = object(await this.#request("account/usage/read", {})); const sample = response && codexAccountUsage(response); if (sample) this.options.usage?.ingest(sample); } catch { /* Version-dependent. */ }
+    await mapLimit([...this.#threads.keys()].slice(0, 12), this.options.concurrency ?? 2, async (threadId) => { try { const response = object(await this.#request("account/usage/read", { threadId })); const sample = response && codexAccountUsage(response); if (sample) this.options.usage?.ingest(sample); } catch { /* Version-dependent. */ } });
+    try { const response = object(await this.#request("account/rateLimits/read", {})); const quota = response ? codexRateLimits(response) : []; if (quota.length) this.options.usage?.ingest({ session_id: null, harness: "codex", provider: "openai", source: "codex-app-server:account/rateLimits/read", source_counter_mode: "cumulative", counter_key: "codex:account:rate-limits", tokens: {}, cost: { status: "unavailable" }, quota }); } catch { /* Version-dependent. */ }
   }
 
   #request(method: string, params: unknown): Promise<unknown> {

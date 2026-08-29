@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -15,13 +15,13 @@ import { HookIngestor } from "./hook-ingestion.js";
 
 test("matches the checked official Claude settings fixture", async () => {
   const expected = JSON.parse(await readFile(join(process.cwd(), "src", "fixtures", "hooks", "claude-code", "settings.json"), "utf8"));
-  const fixtureBridge = { node: "node", bridge: "bridge", command: (harness: string, event: string) => `rivetplane hook emit --owner rivetplane-hook-v1 --harness ${harness} --event ${event}` };
+  const fixtureBridge = { node: "node", bridge: "bridge", statusline: "statusline", statusLineCommand: () => "statusline", command: (harness: string, event: string) => `rivetplane hook emit --owner rivetplane-hook-v1 --harness ${harness} --event ${event}` };
   assert.deepEqual(claudeHookSettings(fixtureBridge), expected);
 });
 
 test("matches the checked official Codex hooks fixture", async () => {
   const expected = JSON.parse(await readFile(join(process.cwd(), "src", "fixtures", "hooks", "codex", "hooks.json"), "utf8"));
-  const fixtureBridge = { node: "node", bridge: "bridge", command: (harness: string, event: string) => `rivetplane hook emit --owner rivetplane-hook-v1 --harness ${harness} --event ${event}` };
+  const fixtureBridge = { node: "node", bridge: "bridge", statusline: "statusline", statusLineCommand: () => "statusline", command: (harness: string, event: string) => `rivetplane hook emit --owner rivetplane-hook-v1 --harness ${harness} --event ${event}` };
   assert.deepEqual(codexHookSettings(fixtureBridge), expected);
 });
 
@@ -42,14 +42,18 @@ test("merges Codex hooks, preserves config.toml, honors CODEX_HOME, and removes 
 
 test("merges and uninstalls only owned Claude hook entries", async () => {
   const home = await mkdtemp(join(tmpdir(), "rivetplane-hooks-")); const config = join(home, ".claude", "settings.json"); await mkdir(join(home, ".claude"));
-  await writeFile(config, JSON.stringify({ theme: "dark", hooks: { PostToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "user-script" }] }] } }));
+  const originalStatusLine = { type: "command", command: `"${process.execPath}" -e "process.stdout.write('user-line')"`, padding: 2 };
+  await writeFile(config, JSON.stringify({ theme: "dark", statusLine: originalStatusLine, hooks: { PostToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "user-script" }] }] } }));
   const executable = async () => true;
   const installed = await installHooks({ home, env: {}, only: ["claude-code"], executable }); assert.equal(installed[0]?.status, "updated");
-  const value = JSON.parse(await readFile(config, "utf8")) as { theme: string; hooks: Record<string, unknown[]> };
-  assert.equal(value.theme, "dark"); assert.equal(value.hooks.PostToolUse!.length, 2);
+  const value = JSON.parse(await readFile(config, "utf8")) as { theme: string; statusLine: { command: string; padding: number }; hooks: Record<string, unknown[]> };
+  assert.equal(value.theme, "dark"); assert.equal(value.hooks.PostToolUse!.length, 2); assert.equal(value.statusLine.padding, 2); assert.match(value.statusLine.command, /claude-statusline\.cjs/); assert.equal(value.statusLine.command.includes("process.stdout.write"), false, "the original command is encoded, not shell-concatenated");
+  const wrapper = join(home, ".config", "harness-cp", "hooks", "v1", "claude-statusline.cjs"); const encoded = Buffer.from(JSON.stringify(originalStatusLine)).toString("base64url");
+  const output = await new Promise<string>((resolve, reject) => { const child = spawn(process.execPath, [wrapper, encoded], { env: { ...process.env, RIVETPLANE_HOOKS_DISABLED: "1" } }); let stdout = ""; child.stdout.on("data", (chunk) => { stdout += String(chunk); }); child.once("error", reject); child.once("close", (code) => code === 0 ? resolve(stdout) : reject(new Error(`status-line exit ${code}`))); child.stdin.end("{}\n"); });
+  assert.equal(output, "user-line", "the wrapper preserves the existing command output");
   await uninstallHooks({ home, env: {}, only: ["claude-code"], executable });
-  const clean = JSON.parse(await readFile(config, "utf8")) as { theme: string; hooks: Record<string, unknown[]> };
-  assert.equal(clean.theme, "dark"); assert.equal(clean.hooks.PostToolUse!.length, 1); assert.equal(JSON.stringify(clean).includes("user-script"), true);
+  const clean = JSON.parse(await readFile(config, "utf8")) as { theme: string; statusLine: typeof originalStatusLine; hooks: Record<string, unknown[]> };
+  assert.equal(clean.theme, "dark"); assert.equal(clean.hooks.PostToolUse!.length, 1); assert.equal(JSON.stringify(clean).includes("user-script"), true); assert.deepEqual(clean.statusLine, originalStatusLine);
 });
 
 test("refreshes only previously installed hooks with the current Node runtime", async () => {
@@ -122,6 +126,12 @@ test("runs the generated OpenCode plugin with exact owner, payload, and answer a
     bridge = { decision: "answer", updated_input: { answers: [["free text"], []] } }; await hook.event({ event: question });
     assert.deepEqual(nativeRequests[1]?.input, { requestID: "question-full", answers: [["free text"], []] });
   } finally { (globalThis as { Bun?: unknown }).Bun = priorBun; }
+});
+
+test("filters unsupported OpenCode events before it spawns the bridge", async () => {
+  const home = await mkdtemp(join(tmpdir(), "rivetplane-opencode-filter-")); await installHooks({ home, env: {}, only: ["opencode"], executable: async () => true });
+  const source = await readFile(join(home, ".config", "opencode", "plugins", "rivetplane.ts"), "utf8"); const guard = source.indexOf("if (!supportedEvents.has(event?.type)) return;"); const spawnAt = source.indexOf("Bun.spawn");
+  assert.ok(guard >= 0); assert.ok(spawnAt > guard, "unsupported high-volume events return before bridge spawn"); await rm(home, { recursive: true, force: true });
 });
 
 test("runs installed Claude and OpenCode hooks with no rivetplane binary on PATH", async () => {

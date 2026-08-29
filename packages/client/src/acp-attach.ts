@@ -4,6 +4,8 @@ import type { AcpSessionDescriptor } from "./discovery.js";
 import { normalizeApprovalInput } from "./pending-normalization.js";
 import { SessionRegistry } from "./registry.js";
 import { JsonRpcPeer } from "./rpc.js";
+import type { UsageCollector } from "./usage.js";
+import type { RawUsageSample } from "./usage.js";
 
 type ObjectValue = Record<string, unknown>;
 interface DeferredPending {
@@ -25,12 +27,21 @@ function summary(value: unknown): string {
   try { const text = JSON.stringify(value); return text.length > 500 ? `${text.slice(0, 497)}...` : text; } catch { return String(value); }
 }
 
+export function acpUsageSample(sessionId: string, harness: string, update: ObjectValue, provider?: string, model?: string): RawUsageSample | undefined {
+  const used = typeof update.used === "number" ? update.used : undefined; const size = typeof update.size === "number" ? update.size : undefined;
+  const rawCost = object(update.cost); const amount = typeof rawCost.amount === "number" ? rawCost.amount : undefined;
+  if (used === undefined && size === undefined && amount === undefined) return undefined;
+  return { session_id: sessionId, harness, ...(provider ? { provider } : {}), ...(model ? { model } : {}), source: "acp:session/update:usage_update", source_counter_mode: "cumulative",
+    counter_key: `acp:${harness}:${sessionId}`, tokens: {}, ...(size !== undefined ? { context: { window_size: size, ...(used !== undefined ? { used_tokens: used } : {}) } } : {}),
+    cost: amount !== undefined ? { status: "reported", amount, currency: string(rawCost.currencyCode) || string(rawCost.currency) || "USD" } : { status: "unavailable" } };
+}
+
 export class ACPAttach extends EventEmitter {
   #peer: JsonRpcPeer | undefined;
   #pending: DeferredPending | undefined;
   #closed = false;
 
-  constructor(readonly descriptor: AcpSessionDescriptor, private readonly registry: SessionRegistry, private readonly machineId = "local") { super(); }
+  constructor(readonly descriptor: AcpSessionDescriptor, private readonly registry: SessionRegistry, private readonly machineId = "local", private readonly usage?: UsageCollector) { super(); }
 
   get connected(): boolean { return this.#peer !== undefined; }
 
@@ -192,6 +203,9 @@ export class ACPAttach extends EventEmitter {
         tool_call_id: string(update.toolCallId), output_summary: summary(rawOutput ?? update.content ?? update),
         ...(json(rawOutput) !== undefined ? { output: json(rawOutput)! } : {}), is_error: update.status === "failed",
       });
+    } else if (kind === "usage_update") {
+      const current = this.registry.get(this.descriptor.session_id);
+      const sample = acpUsageSample(this.descriptor.session_id, this.descriptor.harness_type, update, current?.model?.provider_id, current?.model?.model_id); if (sample) this.usage?.ingest(sample);
     }
   }
 

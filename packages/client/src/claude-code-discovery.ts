@@ -9,6 +9,8 @@ import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
 import { runBoundedCommand, type CommandRunner } from "./opencode-export-discovery.js";
+import type { RawUsageSample, UsageCollector } from "./usage.js";
+import type { UsageQuotaWindow } from "@rivetplane/shared/model";
 
 type RecordValue = Record<string, unknown>;
 
@@ -65,6 +67,31 @@ export interface ClaudeCodeDiscoveryOptions {
   runner?: CommandRunner;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
+  usage?: UsageCollector;
+}
+
+function tokenTotal(...values: Array<number | undefined>): number | undefined {
+  return values.some((value) => value !== undefined) ? values.reduce<number>((sum, value) => sum + (value ?? 0), 0) : undefined;
+}
+
+export function claudeMessageUsage(sessionId: string, recordId: string, record: RecordValue, ts: string): RawUsageSample | undefined {
+  const message = object(record.message); const usage = object(message?.usage); if (!usage) return undefined;
+  const input = number(usage.input_tokens ?? usage.inputTokens); const output = number(usage.output_tokens ?? usage.outputTokens);
+  const cacheRead = number(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens); const cacheWrite = number(usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens);
+  const total = tokenTotal(input, output, cacheRead, cacheWrite); const model = string(message?.model); const cost = number(record.costUSD ?? record.cost_usd);
+  return { session_id: sessionId, timestamp: ts, harness: "claude-code", provider: "anthropic", ...(model ? { model } : {}), source: "claude-code:session-jsonl", source_event_id: recordId,
+    source_counter_mode: "incremental", tokens: { input, output, cache_read: cacheRead, cache_write: cacheWrite, total }, cost: cost !== undefined ? { status: "estimated", amount: cost, currency: "USD" } : { status: "unavailable" } };
+}
+
+export function claudeStatusUsage(sessionId: string, state: RecordValue, model?: string): RawUsageSample | undefined {
+  const context = object(state.context_window ?? state.contextWindow); const current = object(context?.current_usage ?? context?.currentUsage);
+  const window = number(context?.context_window_size ?? context?.contextWindowSize); const used = current ? tokenTotal(number(current.input_tokens ?? current.inputTokens), number(current.output_tokens ?? current.outputTokens), number(current.cache_read_input_tokens ?? current.cacheReadInputTokens), number(current.cache_creation_input_tokens ?? current.cacheCreationInputTokens)) : undefined;
+  const costRoot = object(state.cost); const amount = number(costRoot?.total_cost_usd ?? costRoot?.totalCostUsd ?? state.total_cost_usd);
+  const limits = object(state.rate_limits ?? state.rateLimits); const quota: UsageQuotaWindow[] = [];
+  if (limits) for (const [name, raw] of Object.entries(limits)) { const item = object(raw); if (!item) continue; const percent = number(item.used_percentage ?? item.usedPercent); const reset = string(item.resets_at ?? item.resetsAt); quota.push({ name, ...(percent !== undefined ? { used_percent: percent } : {}), ...(reset ? { resets_at: timestamp(reset) } : {}) }); }
+  if (window === undefined && amount === undefined && quota.length === 0) return undefined;
+  return { session_id: sessionId, harness: "claude-code", provider: "anthropic", ...(model ? { model } : {}), source: "claude-code:status-session", source_counter_mode: "cumulative", counter_key: `claude:session:${sessionId}`, tokens: {},
+    ...(window !== undefined ? { context: { window_size: window, ...(used !== undefined ? { used_tokens: used } : {}) } } : {}), cost: amount !== undefined ? { status: "estimated", amount, currency: "USD" } : { status: "unavailable" }, ...(quota.length ? { quota } : {}) };
 }
 
 function object(value: unknown): RecordValue | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined; }
@@ -277,6 +304,7 @@ export class ClaudeCodeDiscovery {
     this.#reconcilePending(agent.sessionId, currentPending, hookPending, pending);
     this.registry.setStatus(agent.sessionId, statusFromAgent(agent));
     const current = this.registry.get(agent.sessionId); if (current) this.registry.upsert({ ...current, last_activity_at: observedActivity });
+    const usage = state && claudeStatusUsage(agent.sessionId, state, current?.model?.model_id); if (usage) this.options.usage?.ingest(usage);
     this.#checkpoints.sessions[agent.sessionId] = checkpoint;
   }
 
@@ -399,6 +427,7 @@ export class ClaudeCodeDiscovery {
     const ts = timestamp(record.timestamp); const role = string(object(record.message)?.role) ?? string(record.type);
     const current = this.registry.get(sessionId); const model = string(object(record.message)?.model); const customTitle = record.type === "custom-title" ? string(record.customTitle) : undefined;
     if (current && (model || customTitle)) this.registry.upsert({ ...current, ...(model ? { model: { provider_id: "anthropic", model_id: model } } : {}), ...(customTitle ? { title: customTitle } : {}) });
+    const usage = claudeMessageUsage(sessionId, recordId, record, ts); if (usage) this.options.usage?.ingest(usage);
     for (const [index, block] of contentBlocks(record).entries()) {
       const blockType = string(block.type); const blockId = string(block.id) ?? `${recordId}:${index}`; const eventId = stableId(sessionId, recordId, blockId, blockType ?? "unknown");
       if (blockType === "text" && typeof block.text === "string") this.registry.append(sessionId, role === "user" ? "user_message" : "agent_message", { text: block.text }, { id: eventId, ts });

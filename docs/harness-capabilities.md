@@ -22,6 +22,19 @@ The hook installer supports an integration only when the repository contains a c
 | Qoder | None | No checked official configuration and payload fixture | None | Unsupported |
 | Kimi Code | None | No checked official configuration and payload fixture | None | Unsupported |
 
+## Usage metadata
+
+Usage support is additive. Older harness and ACP versions continue to work and can report no usage.
+
+| Harness | Usage source | Limits |
+|---|---|---|
+| ACP | `session/update` `usage_update` | Context `used`/`size` is not counted as tokens. Cost is cumulative. |
+| Codex | `thread/tokenUsage/updated`; optional account token-usage and rate-limit methods | Checked with Codex CLI 0.149.1. Account methods are version-dependent. Credit cost is estimated, not currency billing. |
+| Claude Code | Existing session JSONL plus an owned status-line tee installed with Claude hooks | The tee preserves and restores an existing status-line command. It forwards usage fields only. Context, cost, and rate limits are version-dependent. Cost is estimated. |
+| OpenCode | Native assistant message fields through HTTP/SSE or CLI export | Message cost is harness-reported. Model context needs provider-roster data. |
+
+All adapters emit only usage metadata. They do not put prompt text, message text, tool payloads, or file content in a usage sample. Cumulative counters use a durable reset-aware checkpoint and stable event IDs to prevent duplicate replay after reconnect or restart.
+
 The checked fixtures are in `packages/client/src/fixtures/hooks`. The code test compares generated Claude and Codex configuration with their fixtures. It also checks the generated OpenCode plugin contract and runs the official native payload fixtures through normalization and reply handling.
 
 ## Hook endpoint security

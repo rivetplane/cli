@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { EventEmitter } from "node:events";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { WebSocketServer } from "ws";
@@ -43,6 +44,23 @@ test("reports relay frame rejections from the server", async () => {
   let warning = ""; relay.on("warning", (error) => { warning = error instanceof Error ? error.message : String(error); });
   try { relay.start(); await until(() => warning.length > 0); assert.match(warning, /Session payload is invalid/); }
   finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+test("relays usage metadata with session namespacing and account scope", async () => {
+  const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
+  wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+  const registry = new SessionRegistry(); const usage = new EventEmitter(); const now = new Date().toISOString();
+  registry.upsert({ id: "s1", machine_id: "m1", harness_type: "codex", cwd: "/tmp", status: "running", created_at: now, last_activity_at: now, pending: null });
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined, { usage, replay_delay_ms: 60_000 });
+  const base = { event_id: "usage-1", machine_id: "m1", timestamp: now, harness: "codex", source: "test", source_counter_mode: "incremental" as const, tokens: { input: 1, output: null, reasoning: null, cache_read: null, cache_write: null, total: 1 }, cost: { status: "unavailable" as const } };
+  try {
+    relay.start(); await until(() => received.some((message) => message.type === "machine.hello"));
+    usage.emit("usage", { ...base, session_id: "s1" }); usage.emit("usage", { ...base, event_id: "usage-account", session_id: null, quota: [{ name: "primary", used_percent: 25 }] });
+    await until(() => received.filter((message) => message.type === "usage.sample").length === 2);
+    const samples = received.filter((message) => message.type === "usage.sample").map((message) => message.sample as { session_id: string | null });
+    assert.deepEqual(samples.map((sample) => sample.session_id), ["m1/codex/s1", null]); assert.equal(JSON.stringify(samples).includes("prompt"), false);
+  } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
 test("sends recent snapshots and capabilities before bounded round-robin replay", async () => {

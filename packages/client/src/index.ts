@@ -13,3 +13,4 @@ export * from "./opencode-export-discovery.js";
 export * from "./registry.js";
 export * from "./relay.js";
 export * from "./session-manager.js";
+export * from "./usage.js";

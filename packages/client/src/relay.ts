@@ -1,12 +1,12 @@
 import { EventEmitter } from "node:events";
-import type { Machine, Session } from "@rivetplane/shared/model";
+import type { Machine, Session, UsageSample } from "@rivetplane/shared/model";
 import type { ClientToServerMessage, CreateSessionCommand, HarnessCapabilities, ServerToClientMessage } from "@rivetplane/shared/protocol";
 import WebSocket from "ws";
 import type { Credentials } from "./credentials.js";
 import { SessionRegistry } from "./registry.js";
 
 export interface CommandTarget { sendMessage(text: string): Promise<void>; respondToPending(id: string, response: string, scope?: "once" | "always_this_tool" | "always_session"): void | Promise<void>; interrupt(): void | Promise<void> }
-interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[]; replay_delay_ms?: number; replay_interval_ms?: number; heartbeat_interval_ms?: number; session_drain_interval_ms?: number }
+interface RelayOptions { createSession?: (command: CreateSessionCommand) => Promise<string>; capabilities?: () => HarnessCapabilities[]; usage?: EventEmitter; replay_delay_ms?: number; replay_interval_ms?: number; heartbeat_interval_ms?: number; session_drain_interval_ms?: number }
 
 const SNAPSHOT_SESSION_LIMIT = 16;
 const REPLAY_LIMIT_PER_SESSION = 20;
@@ -67,6 +67,7 @@ export class OutboundRelay extends EventEmitter {
       const external = [...this.#externalToLocal].find(([, local]) => local === session_id)?.[0] ?? session_id;
       this.send({ type: "session.removed", session_id: external, removed_at: new Date().toISOString() }); this.#externalToLocal.delete(external);
     });
+    options.usage?.on("usage", (sample: UsageSample) => this.send({ type: "usage.sample", sample: this.#namespaceUsage(sample) }));
   }
 
   start(): void { if (!this.#stopped) return; this.#stopped = false; this.#connect(); }
@@ -99,7 +100,7 @@ export class OutboundRelay extends EventEmitter {
       for (const message of this.#queue.splice(0)) {
         if (message.type === "session.upsert") {
           if (message.session.pending) pending.set(message.session.id, message);
-        } else if (message.type === "command.result" || message.type === "session.removed") essential.push(message);
+        } else if (message.type === "command.result" || message.type === "session.removed" || message.type === "usage.sample") essential.push(message);
       }
       for (const message of [...pending.values(), ...essential]) socket.send(JSON.stringify(message));
       // Session changes discovered before the socket opened are already
@@ -230,5 +231,10 @@ export class OutboundRelay extends EventEmitter {
   #namespace(session: Session): Session {
     const id = this.#externalId(session);
     return { ...session, id, pending: session.pending ? { ...session.pending, session_id: id } : null };
+  }
+  #namespaceUsage(sample: UsageSample): UsageSample {
+    if (!sample.session_id) return sample;
+    const session = this.registry.get(sample.session_id);
+    return session ? { ...sample, session_id: this.#externalId(session) } : sample;
   }
 }
