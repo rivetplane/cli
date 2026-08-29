@@ -78,6 +78,7 @@ export class HarnessControlClient {
       ...(options.opencode_export_concurrency ? { export_concurrency: options.opencode_export_concurrency } : {}),
     });
     if (options.codex !== false) this.codex_rollouts = new CodexRolloutDiscovery(machineId, this.manager.registry, {
+      usage: this.usage,
       ...(options.codex_sessions_directory ? { sessions_directory: options.codex_sessions_directory } : {}), ...(options.codex_checkpoint_path ? { checkpoint_path: options.codex_checkpoint_path } : {}),
       ...(options.discovery_interval_ms ? { interval_ms: options.discovery_interval_ms } : {}),
     });

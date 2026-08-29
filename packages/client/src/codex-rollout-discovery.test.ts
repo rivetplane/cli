@@ -3,8 +3,10 @@ import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { UsageSample } from "@rivetplane/shared/model";
 import { CodexRolloutDiscovery, parseCodexRolloutLine } from "./codex-rollout-discovery.js";
 import { SessionRegistry } from "./registry.js";
+import { UsageCollector } from "./usage.js";
 
 const fixture = join(process.cwd(), "src", "fixtures", "codex", "rollout-basic.jsonl");
 
@@ -15,6 +17,22 @@ test("parses supported rollout lines and ignores malformed or unknown schemas", 
   assert.equal(parseCodexRolloutLine(lines[2]!, "019c-test-thread").event, undefined);
   assert.deepEqual(parseCodexRolloutLine("{partial", "fallback"), {});
   assert.deepEqual(parseCodexRolloutLine(lines.at(-1)!, "fallback"), {});
+});
+
+test("collects cumulative Codex token usage from plain rollout discovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rivetplane-codex-usage-")); const sessions = join(root, "sessions"); const path = join(sessions, "rollout-usage.jsonl");
+  await mkdir(sessions, { recursive: true });
+  const meta = { timestamp: "2026-08-30T00:00:00.000Z", type: "session_meta", payload: { id: "codex-usage", timestamp: "2026-08-30T00:00:00.000Z", cwd: "/tmp/repo", cli_version: "0.149.1", model_provider: "openai" } };
+  const token = (timestamp: string, input: number, output: number) => ({ timestamp, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: input, cached_input_tokens: input - 10, cache_write_input_tokens: 0, output_tokens: output, reasoning_output_tokens: 5, total_tokens: input + output }, last_token_usage: {}, model_context_window: 258_400 } } });
+  await writeFile(path, `${JSON.stringify(meta)}\n${JSON.stringify(token("2026-08-30T00:00:01.000Z", 100, 20))}\n`);
+  const registry = new SessionRegistry(); const usage = new UsageCollector("machine-1", { checkpoint_path: join(root, "usage.json") }); await usage.start(); const samples: UsageSample[] = []; usage.on("usage", (sample: UsageSample) => samples.push(sample));
+  const discovery = new CodexRolloutDiscovery("machine-1", registry, { sessions_directory: sessions, checkpoint_path: join(root, "rollout.json"), usage, scan_interval_ms: 1 });
+  try {
+    await discovery.poll(); assert.equal(samples.length, 1); assert.deepEqual(samples[0]?.tokens, { input: 100, output: 20, reasoning: 5, cache_read: 90, cache_write: 0, total: 120 }); assert.deepEqual(samples[0]?.context, { window_size: 258_400, used_tokens: 120 });
+    await writeFile(path, `${JSON.stringify(meta)}\n${JSON.stringify(token("2026-08-30T00:00:01.000Z", 100, 20))}\n${JSON.stringify(token("2026-08-30T00:00:02.000Z", 150, 30))}\n`);
+    await discovery.poll(); assert.equal(samples.length, 2); assert.deepEqual(samples[1]?.tokens, { input: 50, output: 10, reasoning: 0, cache_read: 50, cache_write: 0, total: 60 });
+    await discovery.poll(); assert.equal(samples.length, 2, "an unchanged rollout does not emit usage again");
+  } finally { discovery.stop(); await usage.flush(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("detects and resolves explicit escalated Codex custom tool approvals", async () => {
