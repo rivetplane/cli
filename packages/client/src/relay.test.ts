@@ -63,6 +63,24 @@ test("relays usage metadata with session namespacing and account scope", async (
   } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
+test("holds early usage until its namespaced session can be sent first", async () => {
+  const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
+  wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+  const registry = new SessionRegistry(); const usage = new EventEmitter(); const now = new Date().toISOString();
+  const relay = new OutboundRelay({ server_url: `http://127.0.0.1:${port}`, machine_id: "m1", machine_name: "test", device_id: "00000000-0000-4000-8000-000000000001", owner_account_id: "a1", token: "secret" }, registry, () => undefined, { usage, replay_delay_ms: 60_000 });
+  const sample = { event_id: "usage-early", machine_id: "m1", session_id: "early", timestamp: now, harness: "claude-code", source: "status-line", source_counter_mode: "cumulative" as const, tokens: { input: null, output: null, reasoning: null, cache_read: null, cache_write: null, total: null }, cost: { status: "unavailable" as const } };
+  try {
+    relay.start(); await until(() => received.some((message) => message.type === "machine.hello")); usage.emit("usage", sample);
+    await new Promise((resolve) => setTimeout(resolve, 25)); assert.equal(received.some((message) => message.type === "usage.sample"), false);
+    registry.upsert({ id: "early", machine_id: "m1", harness_type: "claude-code", cwd: "/tmp", status: "running", created_at: now, last_activity_at: now, pending: null });
+    await until(() => received.some((message) => message.type === "usage.sample"));
+    const sessionIndex = received.findIndex((message) => message.type === "session.upsert"); const usageIndex = received.findIndex((message) => message.type === "usage.sample");
+    assert.ok(sessionIndex >= 0 && sessionIndex < usageIndex);
+    assert.equal(((received[usageIndex]?.sample as { session_id: string }).session_id), "m1/claude-code/early");
+  } finally { relay.stop(); for (const client of wss.clients) client.terminate(); await new Promise<void>((resolve) => wss.close(() => resolve())); await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
 test("sends recent snapshots and capabilities before bounded round-robin replay", async () => {
   const server = createServer(); const wss = new WebSocketServer({ server }); const received: Array<Record<string, unknown>> = [];
   wss.on("connection", (socket) => socket.on("message", (raw) => received.push(JSON.parse(raw.toString()) as Record<string, unknown>)));
