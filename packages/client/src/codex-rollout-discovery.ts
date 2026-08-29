@@ -8,13 +8,14 @@ import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
 import type { HarnessDiscoveryStatus } from "./session-manager.js";
+import type { RawUsageSample, UsageCollector } from "./usage.js";
 
 type RecordValue = Record<string, unknown>;
 interface Checkpoint { path: string; offset: number; size: number; mtime_ms: number; inode?: number; meta?: RolloutMeta; skipping_line?: boolean }
 interface CheckpointFile { version: 1; sessions: Record<string, Checkpoint> }
 interface RolloutMeta { id: string; cwd: string; created_at: string; cli_version?: string; model_provider?: string }
 interface ParsedEvent { type: TranscriptEventType; payload: TranscriptEventPayloadMap[TranscriptEventType]; id: string; ts: string }
-interface ParsedLine { meta?: RolloutMeta; event?: ParsedEvent; pending?: PendingInteraction; resolved_pending_id?: string; resolved_pending_resolution?: "approve" | "deny" }
+interface ParsedLine { meta?: RolloutMeta; event?: ParsedEvent; usage?: RawUsageSample; pending?: PendingInteraction; resolved_pending_id?: string; resolved_pending_resolution?: "approve" | "deny" }
 
 export interface CodexRolloutDiscoveryOptions {
   sessions_directory?: string;
@@ -31,10 +32,12 @@ export interface CodexRolloutDiscoveryOptions {
   retry_base_ms?: number;
   max_retry_ms?: number;
   now?: () => number;
+  usage?: UsageCollector;
 }
 
 function object(value: unknown): RecordValue | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined; }
 function string(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
+function number(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined; }
 function missingDirectory(error: unknown): boolean {
   const code = object(error)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
@@ -102,6 +105,15 @@ export function parseCodexRolloutLine(line: string, fallbackSessionId: string, m
     const id = string(payload.id) ?? fallbackSessionId; const cwd = string(payload.cwd);
     if (!id || !cwd) return {};
     return { meta: { id, cwd, created_at: timestamp(payload.timestamp ?? root.timestamp), ...(string(payload.cli_version) ? { cli_version: string(payload.cli_version) } : {}), ...(string(payload.model_provider) ? { model_provider: string(payload.model_provider) } : {}) } };
+  }
+  if (root.type === "event_msg" && payload?.type === "token_count") {
+    const info = object(payload.info); const total = object(info?.total_token_usage); if (!info || !total) return {};
+    const input = number(total.input_tokens); const output = number(total.output_tokens); const reasoning = number(total.reasoning_output_tokens);
+    const cacheRead = number(total.cached_input_tokens); const cacheWrite = number(total.cache_write_input_tokens); const all = number(total.total_tokens); const window = number(info.model_context_window);
+    if ([input, output, reasoning, cacheRead, cacheWrite, all, window].every((value) => value === undefined)) return {};
+    return { usage: { session_id: fallbackSessionId, timestamp: ts, harness: "codex", provider: "openai", source: "codex-rollout:event_msg:token_count", source_counter_mode: "cumulative", counter_key: `codex:rollout:${fallbackSessionId}`,
+      tokens: { input, output, reasoning, cache_read: cacheRead, cache_write: cacheWrite, total: all },
+      ...(window !== undefined ? { context: { window_size: window, ...(all !== undefined ? { used_tokens: all } : {}) } } : {}), cost: { status: "unavailable" } } };
   }
   if (root.type !== "response_item" || !payload) return {};
   const payloadType = string(payload.type); const identity = { ts, payload };
@@ -261,6 +273,7 @@ export class CodexRolloutDiscovery {
     this.registry.upsert(session);
     for (const line of lines) {
       const parsed = parseCodexRolloutLine(line, meta.id, this.options.max_event_text_bytes); const event = parsed.event;
+      if (!controlled && parsed.usage) this.options.usage?.ingest(parsed.usage);
       if (event) {
         this.registry.append(meta.id, event.type, event.payload as never, { id: event.id, ts: event.ts });
         if (event.type === "user_message" && !this.registry.get(meta.id)?.title) {
