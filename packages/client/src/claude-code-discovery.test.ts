@@ -67,6 +67,20 @@ test("does not clear a question supplied by the live Claude hook", async () => {
   } finally { await rm(env.root, { recursive: true, force: true }); }
 });
 
+test("clears an expired hook question after Claude resumes running", async () => {
+  const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json")); agents[0] = { ...agents[0]!, waitingFor: undefined, state: "working" };
+  const requestedAt = "2026-08-25T15:41:40.000Z";
+  const pending = { type: "question" as const, id: "expired-hook-question", session_id: sessionId, prompt: "Choose a lane", options: ["Stable", "Beta"], requested_at: requestedAt, source: "claude-code-hook-command", response_mode: "local" as const, read_only: true };
+  try {
+    const registry = new SessionRegistry();
+    registry.upsert({ id: sessionId, machine_id: "machine-1", harness_type: "claude-code", cwd: "/private/tmp/claude-project", status: "running", created_at: requestedAt, last_activity_at: requestedAt, pending, read_only: true, metadata: { hook_pending: { id: pending.id }, hook_response_expired_at: requestedAt } }, { authority: 80 });
+    const manager = new ClaudeCodeDiscovery("machine-1", registry, { executable: process.execPath, config_dir: env.config, checkpoint_path: join(env.root, "expired-hook.json"), runner: runner(() => agents) });
+    await manager.poll();
+    assert.equal(registry.get(sessionId)?.pending, null);
+    manager.stop();
+  } finally { await rm(env.root, { recursive: true, force: true }); }
+});
+
 test("does not replace an actionable hook question with its read-only transcript copy", async () => {
   const env = await setup(); const agents = parseClaudeAgents(await fixture("agents-question.json"));
   const requestedAt = "2026-08-25T15:41:40.000Z";
