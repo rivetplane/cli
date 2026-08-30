@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { Approval, PendingInteraction, Question, Session, TranscriptEventPayloadMap, TranscriptEventType } from "@rivetplane/shared/model";
+import type { Approval, PendingInteraction, Question, Session, TranscriptEventPayloadMap, TranscriptEventType, UsageQuotaWindow } from "@rivetplane/shared/model";
 import type { HarnessCapabilities } from "@rivetplane/shared/protocol";
 import type { CommandTarget } from "./relay.js";
 import { SessionRegistry } from "./registry.js";
@@ -38,6 +38,16 @@ export interface CodexRolloutDiscoveryOptions {
 function object(value: unknown): RecordValue | undefined { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : undefined; }
 function string(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
 function number(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined; }
+function codexRolloutQuota(value: unknown): UsageQuotaWindow[] {
+  const limits = object(value); if (!limits) return [];
+  const prefix = string(limits.limit_name) ?? string(limits.limit_id) ?? ""; const result: UsageQuotaWindow[] = [];
+  for (const name of ["primary", "secondary"] as const) {
+    const window = object(limits[name]); if (!window) continue; const used = number(window.used_percent); const reset = number(window.resets_at);
+    if (used === undefined && reset === undefined) continue;
+    result.push({ name: prefix ? `${prefix}:${name}` : name, ...(used !== undefined ? { used_percent: used } : {}), ...(reset !== undefined ? { resets_at: new Date(reset * 1_000).toISOString() } : {}) });
+  }
+  return result;
+}
 function missingDirectory(error: unknown): boolean {
   const code = object(error)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
@@ -110,10 +120,11 @@ export function parseCodexRolloutLine(line: string, fallbackSessionId: string, m
     const info = object(payload.info); const total = object(info?.total_token_usage); if (!info || !total) return {};
     const input = number(total.input_tokens); const output = number(total.output_tokens); const reasoning = number(total.reasoning_output_tokens);
     const cacheRead = number(total.cached_input_tokens); const cacheWrite = number(total.cache_write_input_tokens); const all = number(total.total_tokens); const window = number(info.model_context_window);
+    const quota = codexRolloutQuota(payload.rate_limits);
     if ([input, output, reasoning, cacheRead, cacheWrite, all, window].every((value) => value === undefined)) return {};
     return { usage: { session_id: fallbackSessionId, timestamp: ts, harness: "codex", provider: "openai", source: "codex-rollout:event_msg:token_count", source_counter_mode: "cumulative", counter_key: `codex:rollout:${fallbackSessionId}`,
       tokens: { input, output, reasoning, cache_read: cacheRead, cache_write: cacheWrite, total: all },
-      ...(window !== undefined ? { context: { window_size: window, ...(all !== undefined ? { used_tokens: all } : {}) } } : {}), cost: { status: "unavailable" } } };
+      ...(window !== undefined ? { context: { window_size: window, ...(all !== undefined ? { used_tokens: all } : {}) } } : {}), cost: { status: "unavailable" }, ...(quota.length ? { quota } : {}) } };
   }
   if (root.type !== "response_item" || !payload) return {};
   const payloadType = string(payload.type); const identity = { ts, payload };
