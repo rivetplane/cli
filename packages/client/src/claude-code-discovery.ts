@@ -297,7 +297,7 @@ export class ClaudeCodeDiscovery {
     } else if (wait.includes("permission")) pending = explicitApproval(agent.sessionId, state);
     const currentSession = this.registry.get(agent.sessionId); const currentPending = currentSession?.pending ?? null;
     const hookMarker = object(object(currentSession?.metadata)?.hook_pending);
-    const hookPending = currentPending && string(hookMarker?.id) === currentPending.id ? currentPending : null;
+    const hookPending = currentPending && !currentPending.read_only && string(hookMarker?.id) === currentPending.id ? currentPending : null;
     // The live hook owns Claude's response callback. Transcript/state discovery
     // can observe the same question under its native tool-use ID, but that
     // read-only observation must never replace the actionable hook record.
